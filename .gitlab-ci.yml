@@ -8,8 +8,11 @@ before_script:
 
 build:
   stage: build
+  cache:
+    paths:
+      - external/
   script:
-    - west build --build-dir $CI_PROJECT_DIR/build $CI_PROJECT_DIR --pristine --board nrf52833dk/nrf52833 --no-sysbuild -- -DNCS_TOOLCHAIN_VERSION=NONE -DCONF_FILE=$CI_PROJECT_DIR/prj.conf
+    - west build --build-dir $CI_PROJECT_DIR/application/build $CI_PROJECT_DIR/application --pristine --board nrf52833dk/nrf52833 --no-sysbuild -- -DNCS_TOOLCHAIN_VERSION=NONE -DCONF_FILE=$CI_PROJECT_DIR/application/prj.conf
 
 # dt_aliases:
 #   stage: test
