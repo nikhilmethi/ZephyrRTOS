@@ -13,6 +13,7 @@ The CI build badge above indicates the status of the main branch of the reposito
 * `.gitlab-ci.yml` - GitLab CI configuration file
 * `.gitignore` - ignore files that are not needed in the git repository
 * `.west.yml` - Zephyr west configuration file
+* `testing/technical_report.ipynb` - Jupyter notebook for the technical report
 
 ## Getting Started
 
