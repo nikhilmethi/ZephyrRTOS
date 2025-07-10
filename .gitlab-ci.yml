@@ -1,11 +1,11 @@
 stages:
   - build
 
+image: hardwario/nrf-connect-sdk-build:v2.9.0-1
+
 build:
   stage: build
-  image: ghcr.io/zephyrproject-rtos/ci
   before_script:
-      - west init -m https://github.com/nrfconnect/sdk-nrf --mr v3.0.2
       - west update -o=--depth=1 -n
   script:
       - west build --build-dir $CI_PROJECT_DIR/build $CI_PROJECT_DIR --pristine --board nrf52833dk/nrf52833 --no-sysbuild -- -DNCS_TOOLCHAIN_VERSION=NONE -DCONF_FILE=$CI_PROJECT_DIR/prj.conf
