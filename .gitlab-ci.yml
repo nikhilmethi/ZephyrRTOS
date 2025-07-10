@@ -8,7 +8,7 @@ build:
       - west init -m https://github.com/nrfconnect/sdk-nrf --mr v3.0.2
       - west update -o=--depth=1 -n
   script:
-      - west build --build-dir $CI_PROJECT_DIR/build $CI_PROJECT_DIR --pristine --board nrf52833dk_nrf52833 --no-sysbuild -- -DNCS_TOOLCHAIN_VERSION=NONE -DCONF_FILE=$CI_PROJECT_DIR/prj.conf
+      - west build --build-dir $CI_PROJECT_DIR/build $CI_PROJECT_DIR --pristine --board nrf52833dk/nrf52833 --no-sysbuild -- -DNCS_TOOLCHAIN_VERSION=NONE -DCONF_FILE=$CI_PROJECT_DIR/prj.conf
 
 # dt_aliases:
 #   stage: test
