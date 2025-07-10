@@ -1,0 +1,8 @@
+/ {
+	aliases {
+        // add your aliases here; examples:
+        heartbeat = &led0;  // this corresponds to LED1 on the board
+        sleepbutton = &button0;  // this corresponds to SW1 on the board
+        resetbutton = &button3;
+	};
+};
