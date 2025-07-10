@@ -2,3 +2,6 @@ build*/
 .DS_Store
 .vscode/
 external/
+.conda/
+venv/
+.venv/
