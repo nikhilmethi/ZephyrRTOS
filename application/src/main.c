@@ -3,6 +3,9 @@
 #include <zephyr/devicetree.h>
 #include <zephyr/drivers/gpio.h> 
 #include <zephyr/logging/log.h>  // needs CONFIG_LOG=y in your prj.conf
+// #include <zephyr/drivers/adc.h> // CONFIG_ADC=y
+// #include <zephyr/drivers/pwm.h> // CONFIG_PWM=y
+// #include <zephyr/smf.h> // CONFIG_SMF=y
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
 
