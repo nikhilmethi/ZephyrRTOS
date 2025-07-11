@@ -7,5 +7,6 @@ dependencies:
   - matplotlib
   - numpy
   - pandas
+  - pytest
   - scipy
   - seaborn

@@ -1,18 +1,27 @@
 stages:
   - build
+  - test
 
-image: hardwario/nrf-connect-sdk-build:v2.9.0-1
-
-before_script:
-  - west update -o=--depth=1 -n
-
-build:
+zephyr_build:
   stage: build
+  image: hardwario/nrf-connect-sdk-build:v2.9.0-1
   cache:
     paths:
       - external/
+  before_script:
+    - west update -o=--depth=1 -n
   script:
     - west build --build-dir $CI_PROJECT_DIR/application/build $CI_PROJECT_DIR/application --pristine --board nrf52833dk/nrf52833 --no-sysbuild -- -DNCS_TOOLCHAIN_VERSION=NONE -DCONF_FILE=$CI_PROJECT_DIR/application/prj.conf
+
+
+pytest:
+  stage: test
+  image: python:3.12-slim
+  before_script:
+    - apt-get update
+    - pip3 install -r requirements.txt
+  script:
+    - pytest -v
 
 # dt_aliases:
 #   stage: test
