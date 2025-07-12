@@ -50,13 +50,13 @@ This lab introduces the State Machine Framework (SMF) in Zephyr, which is used t
 
 This lab covers the use of ADC in Zephyr, which is essential for reading analog signals from sensors, including ECG electrodes.
 
-[https://mlp6.github.io/Embedded-Medical-Devices/labs/zephyr-adc-pwm-lab.html](https://mlp6.github.io/Embedded-Medical-Devices/labs/zephyr-adc-pwm-lab.html)
+[https://mlp6.github.io/Embedded-Medical-Devices/labs/zephyr-adc-lab.html](https://mlp6.github.io/Embedded-Medical-Devices/labs/zephyr-adc-lab.html)
 
 ## Pulse Width Modulation (PWM)
 
 This lab covers the use of PWM in Zephyr, which is essential for controlling the brightness of LEDs and the speed of motors.
 
-[https://mlp6.github.io/Embedded-Medical-Devices/labs/zephyr-adc-pwm-lab.html](https://mlp6.github.io/Embedded-Medical-Devices/labs/zephyr-adc-pwm-lab.html)
+[https://mlp6.github.io/Embedded-Medical-Devices/labs/zephyr-pwm-lab.html](https://mlp6.github.io/Embedded-Medical-Devices/labs/zephyr-pwm-lab.html)
 
 ## Serial Communication (I2C/Sensors)
 
