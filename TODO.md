@@ -9,3 +9,5 @@
     - [ ] Recommend the `v3.X` SDK for everything
 
 - [ ] Implement GPIO emulation for testing / grading.
+
+- [ ] Migrate to GitHub for Gradescope integration?
