@@ -45,7 +45,10 @@ if(NRF_CONNECT_SDK_VERSION VERSION_LESS "2.5.0")
 endif()
 ```
 
-
 - [ ] Implement GPIO emulation for testing / grading.
 
 - [ ] Migrate to GitHub for Gradescope integration?
+
+- [ ] add `ble-lib.*` to this repo
+
+- [ ] change `NOMINAL_BATTERY_VOLT_MV` from 3700 -> 3000
