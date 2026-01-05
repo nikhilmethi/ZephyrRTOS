@@ -4,11 +4,9 @@ stages:
 
 zephyr_build:
   stage: build
-  image: hardwario/nrf-connect-sdk-build:v2.9.0-1
-  cache:
-    paths:
-      - external/
+  image: zephyrprojectrtos/ci
   before_script:
+    - west init
     - west update -o=--depth=1 -n
   script:
     - west build --build-dir $CI_PROJECT_DIR/application/build $CI_PROJECT_DIR/application --pristine --board nrf52833dk/nrf52833 --no-sysbuild -- -DNCS_TOOLCHAIN_VERSION=NONE -DCONF_FILE=$CI_PROJECT_DIR/application/prj.conf
