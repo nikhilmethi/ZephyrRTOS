@@ -52,7 +52,7 @@ pytest:
 #       done
 
 check_v1_0_0_tag:
-   stage: git_check
+   stage: test
    image: ghcr.io/linuxcontainers/alpine:latest
    before_script:
      - apk update
