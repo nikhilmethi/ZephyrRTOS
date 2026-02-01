@@ -6,7 +6,7 @@ zephyr_build:
   stage: build
   image: zephyrprojectrtos/ci
   variables:
-    NCS_VERSION: v3.2.0
+    NCS_VERSION: v3.2.1
   before_script:
     - west init -m https://github.com/nrfconnect/sdk-nrf --mr $NCS_VERSION /workdir/ncs
     - cd /workdir/ncs && west update -o=--depth=1 -n
