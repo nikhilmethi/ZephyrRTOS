@@ -5,11 +5,14 @@ stages:
 zephyr_build:
   stage: build
   image: zephyrprojectrtos/ci
+  variables:
+    NCS_VERSION: v3.2.0
   before_script:
-    - west init
-    - west update -o=--depth=1 -n
+    - west init -m https://github.com/nrfconnect/sdk-nrf --mr $NCS_VERSION /workdir/ncs
+    - cd /workdir/ncs && west update -o=--depth=1 -n
   script:
-    - west build --build-dir $CI_PROJECT_DIR/application/build $CI_PROJECT_DIR/application --pristine --board nrf52833dk/nrf52833 --no-sysbuild -- -DNCS_TOOLCHAIN_VERSION=NONE -DCONF_FILE=$CI_PROJECT_DIR/application/prj.conf
+    - cd /workdir/ncs
+    - west build $CI_PROJECT_DIR/application --pristine --board nrf52833dk/nrf52833 --no-sysbuild -- -DNCS_TOOLCHAIN_VERSION=NONE -DCONF_FILE=$CI_PROJECT_DIR/application/prj.conf
 
 
 pytest:
