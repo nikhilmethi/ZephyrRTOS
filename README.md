@@ -1,4 +1,4 @@
-[![pipeline status](https://gitlab.oit.duke.edu/EmbeddedMedicalDevices/duke-bme554-ecg-temp-ble-lab/badges/main/pipeline.svg)](https://gitlab.oit.duke.edu/EmbeddedMedicalDevices/duke-bme554-ecg-temp-ble-lab/-/commits/main) 
+[![pipeline status](https://gitlab.oit.duke.edu/mlp6/duke-bme554-ecg-temp-ble-lab/badges/main/pipeline.svg)](https://gitlab.oit.duke.edu/mlp6/duke-bme554-ecg-temp-ble-lab/-/commits/main) 
 
 # Duke BME 554: ECG, Temperature, and BLE Device Labs
 
@@ -17,10 +17,6 @@ The CI build badge above indicates the status of the main branch of the reposito
 
 ## Getting Started
 
-You will need to run `west update` to download the Zephyr SDK and other
-dependencies before building the project. This will also create a local Zephyr
-workspace in the `external/` directory, which will take a while to download, but
-only needs to be done once.
 
 ## Zephyr Devicetree, GPIO & Callbacks
 

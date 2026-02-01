@@ -23,7 +23,7 @@ pytest:
 
 # dt_aliases:
 #   stage: test
-#   image: ghcr.io/alpine:latest
+#   image: ghcr.io/linuxcontainers/alpine:latest
 #   script:
 #     - |+
 #       for dt_alias in heartbeat ivpump buzzer error sleepbutton frequpbutton freqdownbutton resetbutton
@@ -33,7 +33,7 @@ pytest:
 
 # gpio_structs:
 #   stage: test
-#   image: ghcr.io/alpine:latest
+#   image: ghcr.io/linuxcontainers/alpine:latest
 #   script:
 #     - |+
 #       for struct in heartbeat_led iv_pump_led buzzer_led error_led sleep_button freq_up_button freq_down_button reset_button
@@ -51,30 +51,30 @@ pytest:
 #         grep $macro $CI_PROJECT_DIR/src/main.c
 #       done
 
-# check_v1_0_0_tag:
-#   stage: git_check
-#   image: ghcr.io/alpine:latest
-#   before_script:
-#     - apk update
-#     - apk add --no-cache git
-#   script:
-#     - git fetch --tags
-#     - |
-#       if git rev-parse -q --verify "refs/tags/v1.0.0" >/dev/null; then
-#         echo "Tag v1.0.0 exists"
-#       else
-#         echo "Tag v1.0.0 does not exist"
-#         exit 1
-#       fi
+check_v1_0_0_tag:
+   stage: git_check
+   image: ghcr.io/linuxcontainers/alpine:latest
+   before_script:
+     - apk update
+     - apk add --no-cache git
+   script:
+     - git fetch --tags
+     - |
+       if git rev-parse -q --verify "refs/tags/v1.0.0" >/dev/null; then
+         echo "Tag v1.0.0 exists"
+       else
+         echo "Tag v1.0.0 does not exist"
+         exit 1
+       fi
 
-# check_state_diagram:
-#   stage: test
-#   image: ghcr.io/alpine:latest
-#   script:
-#     - |+
-#       if [ -f "state_diagram.png" ]; then
-#         echo "state_diagram.png exists"
-#       else
-#         echo "state_diagram.png does not exist"
-#         exit 1
-#       fi
+check_state_diagram:
+   stage: test
+   image: ghcr.io/linuxcontainers/alpine:latest
+   script:
+     - |+
+       if [ -f "state_diagram.png" ]; then
+         echo "state_diagram.png exists"
+       else
+         echo "state_diagram.png does not exist"
+         exit 1
+       fi
