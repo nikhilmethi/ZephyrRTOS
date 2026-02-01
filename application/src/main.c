@@ -6,6 +6,7 @@
 // #include <zephyr/drivers/adc.h> // CONFIG_ADC=y
 // #include <zephyr/drivers/pwm.h> // CONFIG_PWM=y
 // #include <zephyr/smf.h> // CONFIG_SMF=y
+// #include "ble-lib.h" // BME554 BLE library (remember to add to CMakeLists.txt)
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
 
