@@ -11,6 +11,7 @@ LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
 
 // define macros 
 #define HEARTBEAT_TOGGLE_INTERVAL_MS 500
+#define NOMINAL_BATTERY_VOLT_MV 3000 
 
 // declare function prototypes
 

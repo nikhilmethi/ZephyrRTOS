@@ -8,7 +8,6 @@ static K_SEM_DEFINE(bt_init_ok, 1, 1);
 
 #define DEVICE_NAME CONFIG_BT_DEVICE_NAME
 #define DEVICE_NAME_LEN (sizeof(DEVICE_NAME)-1)
-#define NOMINAL_BATTERY_VOLT_MV 3000  // this might make more sense to have in main.c
 
 // extern means this is defined elsewhere (in this case, main.c)
 extern int32_t temperature_degC;  // temperature data characteristic will read from this variable
