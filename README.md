@@ -1,4 +1,4 @@
-[![pipeline status](https://gitlab.oit.duke.edu/mlp6/duke-bme554-ecg-temp-ble-lab/badges/main/pipeline.svg)](https://gitlab.oit.duke.edu/mlp6/duke-bme554-ecg-temp-ble-lab/-/commits/main) 
+[![pipeline status](https://gitlab.oit.duke.edu/nm329/duke-bme554-ecg-temp-ble-lab/badges/main/pipeline.svg)](https://gitlab.oit.duke.edu/nm329/duke-bme554-ecg-temp-ble-lab/-/commits/main) 
 
 # Duke BME 554: ECG, Temperature, and BLE Device Labs
 
