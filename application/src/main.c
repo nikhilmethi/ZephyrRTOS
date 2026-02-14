@@ -208,7 +208,7 @@ int main(void)
                 break;
 
 
-            case AWAKE:
+            case AWAKE: {
                 // Heartbeat (temporarily in this state)
                 if (current_time - heartbeat.next_toggle_ms > HEARTBEAT_TOGGLE_INTERVAL_MS) {
                     gpio_pin_toggle_dt(&heartbeat_led);
@@ -234,6 +234,7 @@ int main(void)
                 // Bounds check: enter ERROR if out of range
                 if (action_freq_hz < ACTION_FREQ_MIN_HZ || action_freq_hz > ACTION_FREQ_MAX_HZ) {
                     state = ERROR;
+                    break;
                 }
 
                 // Action LEDs (out-of-phase)
@@ -256,7 +257,7 @@ int main(void)
                             action_freq_hz, action_phase);
                 }
                 break;
-
+            }
             case SLEEP:
                 // placeholder for now
                 break;
