@@ -2,67 +2,51 @@
 [*] --> INIT
 
 state INIT {
-    init_run: Check GPIO0 interface
-    init_run: Initialize all LEDs and buttons
+    init_run: Check GPIO0 interface ready
+    init_run: Configure all LEDs + buttons
     init_run: Configure interrupts + callbacks for all 4 buttons
-    init_run: Initialize action_freq_hz = 2 and action_phase (out-of-phase)
+    init_run: Heartbeat toggles at 1 Hz independently of state machine
 }
 
 INIT -d-> DEFAULTS : init_ok
 
 state DEFAULTS {
     default_run: Restore default action_freq_hz = 2 Hz
-    default_run: Restore out-of-phase action_phase baseline
+    default_run: Restore out-of-phase action_phase baseline (ivpump ON, buzzer OFF)
+    default_run: Store defaults for sleep restore
     default_run: Ensure error LED OFF
-    default_run: Enable sleep/freq interrupts (reset remains enabled always)
+    default_run: Initialize action LED timing
 }
 
 DEFAULTS --> AWAKE : Successful completion
+DEFAULTS --> DEFAULTS : Reset_button
+
 state AWAKE {
-    awake_run : Action LEDs out-of-phase @ action_freq_hz (issue LOG_INF on toggle)
-    awake_run : Check for freq_up, freq_down, sleep, reset events
+    awake_run: Action LEDs out-of-phase @ action_freq_hz (LOG_INF on toggle)
+    awake_run: Freq_up_button increments action_freq_hz (LOG_INF new freq)
+    awake_run: Freq_down_button decrements action_freq_hz (LOG_INF new freq)
+    awake_run: Check bounds (valid between 1 and 5 Hz); else enter ERROR
 }
 
-AWAKE --> UP : Freq_up_button
-AWAKE --> DOWN : Freq_down_button
 AWAKE --> SLEEP : Sleep_button
 AWAKE --> DEFAULTS : Reset_button
-
-state UP {
-    up_entry : action_freq_hz += 1
-    up_entry : LOG_INF(new freq)
-    up_entry : Check bounds (valid 1..5 Hz)
-}
-
-UP --> AWAKE : In range (1..5)
-UP --> ERROR : Out of range (>5)
-
-state DOWN {
-    down_entry : action_freq_hz -= 1
-    down_entry : LOG_INF(new freq)
-    down_entry : Check bounds (valid 1..5 Hz)
-}
-
-DOWN --> AWAKE : In range (1..5)
-DOWN --> ERROR : Out of range (<1)
+AWAKE --> ERROR : Out-of-range action_freq_hz
 
 state SLEEP {
-    sleep_entry : Store freq + phase
-    sleep_entry : Disable action LEDs (buzzer OFF, ivpump OFF)
-    sleep_entry --> sleep_run
-    sleep_run : Wait for button input
-    sleep_run : Sleep_button restores stored freq + phase and resumes
+    sleep_run: Store action_freq_hz + action_phase
+    sleep_run: Disable action LEDs (buzzer OFF, ivpump OFF)
+    sleep_run: Sleep_button restores stored freq + phase and resumes action LEDs
 }
 
-SLEEP --> DEFAULTS : Reset_button
 SLEEP --> AWAKE : Sleep_button
+SLEEP --> DEFAULTS : Reset_button
 
 state ERROR {
-    error_entry : Disable action LEDs (buzzer OFF, ivpump OFF)
-    error_entry : Turn error LED ON (continuous)
-    error_entry : Disable sleep/freq buttons (interrupts disabled)
-    error_entry : Issue LOG_ERR(descriptive)
+    error_entry: Disable action LEDs (buzzer OFF, ivpump OFF)
+    error_entry: Turn error LED ON (continuous)
+    error_entry: Disable sleep/freq buttons (interrupts disabled)
+    error_entry: Issue LOG_ERR(descriptive, once)
 }
 
-ERROR --> DEFAULTS : Reset_button (restore defaults + re-enable ints)
+ERROR --> DEFAULTS : Reset_button
 @enduml
