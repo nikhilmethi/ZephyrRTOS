@@ -184,9 +184,29 @@ int main(void)
                 break;
 
             case DEFAULTS:
-            // for now, just jump straight to AWAKE (we’ll implement real defaults next commit)
+                // restore default operating parameters
+                action_freq_hz = LED_BLINK_FREQ_HZ;   // 2 Hz default
+                action_phase = 0;                     // ivpump ON, buzzer OFF baseline
+
+                stored_action_freq_hz = action_freq_hz;
+                stored_action_phase = action_phase;
+
+                // clear error state / indicators
+                error_entered = false;
+                gpio_pin_set_dt(&error_led, 0);
+
+                // set immediate out-of-phase outputs (baseline)
+                gpio_pin_set_dt(&iv_pump_led, 1);
+                gpio_pin_set_dt(&buzzer_led, 0);
+
+                // initialize timing for future action blinking (next commit will use this)
+                action.next_toggle_ms = current_time;
+
+                LOG_INF("DEFAULTS: action_freq=%d Hz, phase=%d", action_freq_hz, action_phase);
+
                 state = AWAKE;
                 break;
+
 
             case AWAKE:
                 // keep your current heartbeat code here for now (we’ll move it outside the switch later)
