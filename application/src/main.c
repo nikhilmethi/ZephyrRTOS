@@ -13,6 +13,11 @@ LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
 // define macros 
 #define HEARTBEAT_TOGGLE_INTERVAL_MS 500
 #define NOMINAL_BATTERY_VOLT_MV 3000 
+#define LED_BLINK_FREQ_HZ 2
+#define FREQ_UP_INC_HZ 1
+#define FREQ_DOWN_INC_HZ 1
+#define ACTION_FREQ_MIN_HZ 1
+#define ACTION_FREQ_MAX_HZ 5
 
 // declare function prototypes
 
@@ -45,22 +50,31 @@ static struct gpio_callback freq_up_button_cb;  // example; need one per callbac
 static struct gpio_callback freq_down_button_cb;  // example; need one per callback (button)  
 
 // define states for state machine (THESE ARE ONLY PLACEHOLDERS)
-enum states { INIT, AWAKE_ENTRY, AWAKE_RUN, AWAKE_EXIT, SLEEP };
-int state = INIT; // initial state
+enum states { INIT, DEFAULTS, AWAKE, SLEEP, ERROR };
+static int state = INIT;
 
-struct led {
-    int64_t toggle_time;  // int64_t b/c time functions in Zephyr use this type
-    bool illuminated; // state of the LED (on/off)
-};
+// ---------- Timing / LED state ----------
+typedef struct {
+    int64_t next_toggle_ms;   // next scheduled toggle time (k_uptime_get() domain)
+} blink_timer_t;
 
-struct led heartbeat_led_status = {
-    .toggle_time = 0,
-    .illuminated = false
-};
+// Heartbeat (independent of app state)
+static blink_timer_t heartbeat = { .next_toggle_ms = 0 };
 
-// placeholder variables
-int condition_to_leave_awake_state = 0;
-int next_state = SLEEP;
+// Action LEDs (buzzer + ivpump) are a coordinated out-of-phase pair
+static blink_timer_t action = { .next_toggle_ms = 0 };
+
+// action_phase == 0: ivpump ON, buzzer OFF
+// action_phase == 1: ivpump OFF, buzzer ON
+static bool action_phase = 0;
+
+// Frequency control for action LEDs
+static int action_freq_hz = LED_BLINK_FREQ_HZ;          // current
+static int stored_action_freq_hz = LED_BLINK_FREQ_HZ;   // for sleep restore
+static bool stored_action_phase = 0;                    // for sleep restore
+
+// ERROR state entry latch (prevents repeated LOG_ERR + repeated reconfig)
+static bool error_entered = false;
 
 int main(void)
 {
@@ -166,7 +180,7 @@ int main(void)
                 gpio_add_callback_dt(&freq_down_button, &freq_down_button_cb);
 
 
-                state = AWAKE_ENTRY;  // transition to the next state
+                state = DEFAULTS;  // transition to the next state
                 break;
 
             case AWAKE_ENTRY:
@@ -177,10 +191,9 @@ int main(void)
             case AWAKE_RUN:
                 // do something
 
-                if (current_time - heartbeat_led_status.toggle_time > HEARTBEAT_TOGGLE_INTERVAL_MS) {
+                if (current_time - heartbeat.next_toggle_ms > HEARTBEAT_TOGGLE_INTERVAL_MS) {
                     gpio_pin_toggle_dt(&heartbeat_led);
-                    // gpio_pin_set_dt() - explicitly set the state of a pin (e.g. gpio_pin_set_dt(&led0, 1))
-                    heartbeat_led_status.toggle_time = current_time;
+                    heartbeat.next_toggle_ms = current_time;
                 }
                 break;  // break out of the switch statement without evaluating other cases
             
