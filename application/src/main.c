@@ -183,48 +183,46 @@ int main(void)
                 state = DEFAULTS;  // transition to the next state
                 break;
 
-            case AWAKE_ENTRY:
-                // do something on upon first entering the awake state
-                state = AWAKE_RUN;  // transition to the next state
+            case DEFAULTS:
+            // for now, just jump straight to AWAKE (we’ll implement real defaults next commit)
+                state = AWAKE;
                 break;
 
-            case AWAKE_RUN:
-                // do something
-
+            case AWAKE:
+                // keep your current heartbeat code here for now (we’ll move it outside the switch later)
                 if (current_time - heartbeat.next_toggle_ms > HEARTBEAT_TOGGLE_INTERVAL_MS) {
                     gpio_pin_toggle_dt(&heartbeat_led);
                     heartbeat.next_toggle_ms = current_time;
                 }
-                break;  // break out of the switch statement without evaluating other cases
-            
-                //if (condition_to_leave_awake_state) {
-                //    state = AWAKE_EXIT;  // transition to the next state
-                //}
-                //break;
-            
-            case AWAKE_EXIT:
-                // do something on exit from the awake state
-                state = next_state;  // transition to the next state
                 break;
 
             case SLEEP:
+                // placeholder for now
+                break;
+
+            case ERROR:
+                // placeholder for now
+                break;
+
+
+            //case SLEEP:
                 // want to change what the buttons do in a different state?
                 // gpio_remove_callback_dt(button_gpio_struct, &original_button_cb);
                 // gpio_add_callback_dt(button_gpio_struct, &new_button_cb);
             
                 // OR, want to disable the button entirely?
                 // gpio_pin_interrupt_configure_dt(&sw0, GPIO_INT_DISABLE);
-            default:
+            //default:
                 // handle unexpected state
-                break;
+                //break;
         }
 
         // test for the callback event state in your code
-        if (sleep_button_event) {
+        //if (sleep_button_event) {
             // do something based on the event
-            state = SLEEP;
-            sleep_button_event = 0;  // clear the event after taking action
-        } 
+            //state = SLEEP;
+            //sleep_button_event = 0;  // clear the event after taking action
+        //} 
 
     
         k_msleep(10);  // include a very short sleep statement to allow any LOG messages to be printed
