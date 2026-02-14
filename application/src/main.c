@@ -89,7 +89,13 @@ int main(void)
         // gpio_pin_toggle_dt() - toggle the state of a pin (e.g. gpio_pin_toggle_dt(&led0))
     
         int64_t current_time = k_uptime_get();  // get the current time in milliseconds
-        
+
+        // Heartbeat (independent of state)
+        if (current_time - heartbeat.next_toggle_ms > HEARTBEAT_TOGGLE_INTERVAL_MS) {
+            gpio_pin_toggle_dt(&heartbeat_led);
+            heartbeat.next_toggle_ms = current_time;
+            LOG_INF("Heartbeat toggle");
+        }
 
         switch (state) {
             case INIT:
@@ -289,26 +295,7 @@ int main(void)
 
                 // Do nothing else; wait for reset (handled via reset event logic next commit or already global)
                 break;
-
-
-            //case SLEEP:
-                // want to change what the buttons do in a different state?
-                // gpio_remove_callback_dt(button_gpio_struct, &original_button_cb);
-                // gpio_add_callback_dt(button_gpio_struct, &new_button_cb);
-            
-                // OR, want to disable the button entirely?
-                // gpio_pin_interrupt_configure_dt(&sw0, GPIO_INT_DISABLE);
-            //default:
-                // handle unexpected state
-                //break;
         }
-
-        // test for the callback event state in your code
-        //if (sleep_button_event) {
-            // do something based on the event
-            //state = SLEEP;
-            //sleep_button_event = 0;  // clear the event after taking action
-        //} 
 
         // Global sleep handling
         if (sleep_button_event) {
