@@ -53,7 +53,7 @@ static struct gpio_callback freq_down_button_cb;  // example; need one per callb
 enum states { INIT, DEFAULTS, AWAKE, SLEEP, ERROR };
 static int state = INIT;
 
-// ---------- Timing / LED state ----------
+// Timing / LED state
 typedef struct {
     int64_t next_toggle_ms;   // next scheduled toggle time (k_uptime_get() domain)
 } blink_timer_t;
@@ -73,7 +73,7 @@ static int action_freq_hz = LED_BLINK_FREQ_HZ;          // current
 static int stored_action_freq_hz = LED_BLINK_FREQ_HZ;   // for sleep restore
 static bool stored_action_phase = 0;                    // for sleep restore
 
-// ERROR state entry latch (prevents repeated LOG_ERR + repeated reconfig)
+// ERROR state entry latch
 static bool error_entered = false;
 
 int main(void)
@@ -199,7 +199,7 @@ int main(void)
                 gpio_pin_set_dt(&iv_pump_led, 1);
                 gpio_pin_set_dt(&buzzer_led, 0);
 
-                // initialize timing for future action blinking (next commit will use this)
+                // initialize timing for future action blinking
                 action.next_toggle_ms = current_time;
 
                 LOG_INF("DEFAULTS: action_freq=%d Hz, phase=%d", action_freq_hz, action_phase);
@@ -209,10 +209,31 @@ int main(void)
 
 
             case AWAKE:
-                // keep your current heartbeat code here for now (we’ll move it outside the switch later)
+                // Heartbeat (temporarily in this state)
                 if (current_time - heartbeat.next_toggle_ms > HEARTBEAT_TOGGLE_INTERVAL_MS) {
                     gpio_pin_toggle_dt(&heartbeat_led);
                     heartbeat.next_toggle_ms = current_time;
+                    LOG_INF("Heartbeat toggle");
+                }
+
+                // Action LEDs (out-of-phase)
+                int32_t half_period_ms = 1000 / (2 * action_freq_hz);
+
+                if (current_time >= action.next_toggle_ms) {
+                    action_phase = !action_phase;
+
+                    if (action_phase == 0) {
+                        gpio_pin_set_dt(&iv_pump_led, 1);
+                        gpio_pin_set_dt(&buzzer_led, 0);
+                    } else {
+                        gpio_pin_set_dt(&iv_pump_led, 0);
+                        gpio_pin_set_dt(&buzzer_led, 1);
+                    }
+
+                    action.next_toggle_ms = current_time + half_period_ms;
+
+                    LOG_INF("ACTION toggle (freq=%d Hz, phase=%d)",
+                            action_freq_hz, action_phase);
                 }
                 break;
 
