@@ -13,43 +13,68 @@ LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
 // define macros 
 #define HEARTBEAT_TOGGLE_INTERVAL_MS 500
 #define NOMINAL_BATTERY_VOLT_MV 3000 
+#define LED_BLINK_FREQ_HZ 2
+#define FREQ_UP_INC_HZ 1
+#define FREQ_DOWN_INC_HZ 1
+#define ACTION_FREQ_MIN_HZ 1
+#define ACTION_FREQ_MAX_HZ 5
 
 // declare function prototypes
 
 // define globals and DT-based hardware structs
 //static const struct gpio_dt_spec heartbeat_led = GPIO_DT_SPEC_GET(DT_ALIAS(heartbeat), gpios);
+static const struct gpio_dt_spec heartbeat_led = GPIO_DT_SPEC_GET(DT_ALIAS(heartbeat), gpios);
+static const struct gpio_dt_spec iv_pump_led = GPIO_DT_SPEC_GET(DT_ALIAS(ivpump), gpios);
+static const struct gpio_dt_spec buzzer_led = GPIO_DT_SPEC_GET(DT_ALIAS(buzzer), gpios);
+static const struct gpio_dt_spec error_led = GPIO_DT_SPEC_GET(DT_ALIAS(error), gpios);
 static const struct gpio_dt_spec sleep_button = GPIO_DT_SPEC_GET(DT_ALIAS(sleepbutton), gpios);
 static const struct gpio_dt_spec reset_button = GPIO_DT_SPEC_GET(DT_ALIAS(resetbutton), gpios);
-static const struct gpio_dt_spec heartbeat_led = GPIO_DT_SPEC_GET(DT_ALIAS(heartbeat), gpios);
+static const struct gpio_dt_spec freq_up_button = GPIO_DT_SPEC_GET(DT_ALIAS(frequpbutton), gpios);
+static const struct gpio_dt_spec freq_down_button = GPIO_DT_SPEC_GET(DT_ALIAS(freqdownbutton), gpios);
 
 bool sleep_button_event = 0;  // flag to indicate that the sleep button has been pressed
 bool reset_button_event = 0;  // flag to indicate that the reset button has been pressed
+bool freq_up_button_event = 0;  // flag to indicate that the freq_up button has been pressed
+bool freq_down_button_event = 0; // flag to indicate that the freq_down button has been pressed
 
 // define callback functions
 void sleep_button_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins);
 void reset_button_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins);
+void freq_up_button_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins);
+void freq_down_button_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins);
 
 // initialize GPIO Callback Structs
 static struct gpio_callback sleep_button_cb;  // example; need one per callback (button)  
 static struct gpio_callback reset_button_cb;  // example; need one per callback (button)  
+static struct gpio_callback freq_up_button_cb;  // example; need one per callback (button)  
+static struct gpio_callback freq_down_button_cb;  // example; need one per callback (button)  
 
 // define states for state machine (THESE ARE ONLY PLACEHOLDERS)
-enum states { INIT, AWAKE_ENTRY, AWAKE_RUN, AWAKE_EXIT, SLEEP };
-int state = INIT; // initial state
+enum states { INIT, DEFAULTS, AWAKE, SLEEP, ERROR };
+static int state = INIT;
 
-struct led {
-    int64_t toggle_time;  // int64_t b/c time functions in Zephyr use this type
-    bool illuminated; // state of the LED (on/off)
-};
+// ---------- Timing / LED state ----------
+typedef struct {
+    int64_t next_toggle_ms;   // next scheduled toggle time (k_uptime_get() domain)
+} blink_timer_t;
 
-struct led heartbeat_led_status = {
-    .toggle_time = 0,
-    .illuminated = false
-};
+// Heartbeat (independent of app state)
+static blink_timer_t heartbeat = { .next_toggle_ms = 0 };
 
-// placeholder variables
-int condition_to_leave_awake_state = 0;
-int next_state = SLEEP;
+// Action LEDs (buzzer + ivpump) are a coordinated out-of-phase pair
+static blink_timer_t action = { .next_toggle_ms = 0 };
+
+// action_phase == 0: ivpump ON, buzzer OFF
+// action_phase == 1: ivpump OFF, buzzer ON
+static bool action_phase = 0;
+
+// Frequency control for action LEDs
+static int action_freq_hz = LED_BLINK_FREQ_HZ;          // current
+static int stored_action_freq_hz = LED_BLINK_FREQ_HZ;   // for sleep restore
+static bool stored_action_phase = 0;                    // for sleep restore
+
+// ERROR state entry latch (prevents repeated LOG_ERR + repeated reconfig)
+static bool error_entered = false;
 
 int main(void)
 {
@@ -64,6 +89,7 @@ int main(void)
         // gpio_pin_toggle_dt() - toggle the state of a pin (e.g. gpio_pin_toggle_dt(&led0))
     
         int64_t current_time = k_uptime_get();  // get the current time in milliseconds
+        
 
         switch (state) {
             case INIT:
@@ -76,9 +102,22 @@ int main(void)
                 // configure GPIO pin
                 int err = gpio_pin_configure_dt(&sleep_button, GPIO_INPUT);
                 if (err < 0) {
-                    LOG_ERR("Cannot configure sw0 pin.");
+                    LOG_ERR("Cannot configure sleep button.");
                     return err;
                 }
+
+                err = gpio_pin_configure_dt(&freq_up_button, GPIO_INPUT);
+                if (err < 0) {
+                    LOG_ERR("Cannot configure freq_up button.");
+                    return err;
+                }
+
+                err = gpio_pin_configure_dt(&freq_down_button, GPIO_INPUT);
+                if (err < 0) {
+                    LOG_ERR("Cannot configure freq_down button.");
+                    return err;
+                }
+
                 err = gpio_pin_configure_dt(&reset_button, GPIO_INPUT);
                 if (err < 0) {
                     LOG_ERR("Cannot configure reset button.");
@@ -91,11 +130,37 @@ int main(void)
                     return err;
                 }
 
+                err = gpio_pin_configure_dt(&iv_pump_led, GPIO_OUTPUT_INACTIVE);
+                if (err < 0) {
+                    LOG_ERR("Cannot configure iv_pump LED.");
+                    return err;
+                }
+
+                err = gpio_pin_configure_dt(&buzzer_led, GPIO_OUTPUT_INACTIVE);
+                if (err < 0) {
+                    LOG_ERR("Cannot configure buzzer LED.");
+                    return err;
+                }
+
+                err = gpio_pin_configure_dt(&error_led, GPIO_OUTPUT_INACTIVE);
+                if (err < 0) {
+                    LOG_ERR("Cannot configure error LED.");
+                    return err;
+                }
+
                 // associate callback with GPIO pin
                 // trigger on transition from INACTIVE -> ACTIVE; ACTIVE could be HIGH or LOW
                 err = gpio_pin_interrupt_configure_dt(&sleep_button, GPIO_INT_EDGE_TO_ACTIVE); 
                 if (err < 0) {
                     LOG_ERR("Cannot attach callback to sw0.");
+                }
+                err = gpio_pin_interrupt_configure_dt(&freq_up_button, GPIO_INT_EDGE_TO_ACTIVE); 
+                if (err < 0) {
+                    LOG_ERR("Cannot attach callback to sw1.");
+                }
+                err = gpio_pin_interrupt_configure_dt(&freq_down_button, GPIO_INT_EDGE_TO_ACTIVE); 
+                if (err < 0) {
+                    LOG_ERR("Cannot attach callback to sw2.");
                 }
                 err = gpio_pin_interrupt_configure_dt(&reset_button, GPIO_INT_EDGE_TO_ACTIVE); 
                 if (err < 0) {
@@ -108,52 +173,76 @@ int main(void)
                 gpio_init_callback(&reset_button_cb, reset_button_callback, BIT(reset_button.pin)); // associate callback with GPIO pin
                 gpio_add_callback_dt(&reset_button, &reset_button_cb);
 
-                state = AWAKE_ENTRY;  // transition to the next state
+                gpio_init_callback(&freq_up_button_cb, freq_up_button_callback, BIT(freq_up_button.pin));
+                gpio_add_callback_dt(&freq_up_button, &freq_up_button_cb);
+
+                gpio_init_callback(&freq_down_button_cb, freq_down_button_callback, BIT(freq_down_button.pin));
+                gpio_add_callback_dt(&freq_down_button, &freq_down_button_cb);
+
+
+                state = DEFAULTS;  // transition to the next state
                 break;
 
-            case AWAKE_ENTRY:
-                // do something on upon first entering the awake state
-                state = AWAKE_RUN;  // transition to the next state
+            case DEFAULTS:
+                // restore default operating parameters
+                action_freq_hz = LED_BLINK_FREQ_HZ;   // 2 Hz default
+                action_phase = 0;                     // ivpump ON, buzzer OFF baseline
+
+                stored_action_freq_hz = action_freq_hz;
+                stored_action_phase = action_phase;
+
+                // clear error state / indicators
+                error_entered = false;
+                gpio_pin_set_dt(&error_led, 0);
+
+                // set immediate out-of-phase outputs (baseline)
+                gpio_pin_set_dt(&iv_pump_led, 1);
+                gpio_pin_set_dt(&buzzer_led, 0);
+
+                // initialize timing for future action blinking (next commit will use this)
+                action.next_toggle_ms = current_time;
+
+                LOG_INF("DEFAULTS: action_freq=%d Hz, phase=%d", action_freq_hz, action_phase);
+
+                state = AWAKE;
                 break;
 
-            case AWAKE_RUN:
-                // do something
 
-                if (current_time - heartbeat_led_status.toggle_time > HEARTBEAT_TOGGLE_INTERVAL_MS) {
+            case AWAKE:
+                // keep your current heartbeat code here for now (we’ll move it outside the switch later)
+                if (current_time - heartbeat.next_toggle_ms > HEARTBEAT_TOGGLE_INTERVAL_MS) {
                     gpio_pin_toggle_dt(&heartbeat_led);
-                    // gpio_pin_set_dt() - explicitly set the state of a pin (e.g. gpio_pin_set_dt(&led0, 1))
-                    heartbeat_led_status.toggle_time = current_time;
+                    heartbeat.next_toggle_ms = current_time;
                 }
-                break;  // break out of the switch statement without evaluating other cases
-            
-                if (condition_to_leave_awake_state) {
-                    state = AWAKE_EXIT;  // transition to the next state
-                }
-                break;
-            
-            case AWAKE_EXIT:
-                // do something on exit from the awake state
-                state = next_state;  // transition to the next state
                 break;
 
             case SLEEP:
+                // placeholder for now
+                break;
+
+            case ERROR:
+                // placeholder for now
+                break;
+
+
+            //case SLEEP:
                 // want to change what the buttons do in a different state?
                 // gpio_remove_callback_dt(button_gpio_struct, &original_button_cb);
                 // gpio_add_callback_dt(button_gpio_struct, &new_button_cb);
             
                 // OR, want to disable the button entirely?
                 // gpio_pin_interrupt_configure_dt(&sw0, GPIO_INT_DISABLE);
-            default:
+            //default:
                 // handle unexpected state
-                break;
+                //break;
         }
 
         // test for the callback event state in your code
-        if (sleep_button_event) {
+        //if (sleep_button_event) {
             // do something based on the event
-            state = SLEEP;
-            sleep_button_event = 0;  // clear the event after taking action
-        } 
+            //state = SLEEP;
+            //sleep_button_event = 0;  // clear the event after taking action
+        //} 
 
     
         k_msleep(10);  // include a very short sleep statement to allow any LOG messages to be printed
@@ -170,5 +259,17 @@ void sleep_button_callback(const struct device *dev, struct gpio_callback *cb, u
 void reset_button_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
 {
     reset_button_event = 1;  // conditional statement in main() can now do something based on the event detection
+                             // we can also use actual system kernel event flags, but this is simpler (for now)
+}
+
+void freq_up_button_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
+{
+    freq_up_button_event = 1;  // conditional statement in main() can now do something based on the event detection
+                             // we can also use actual system kernel event flags, but this is simpler (for now)
+}
+
+void freq_down_button_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
+{
+    freq_down_button_event = 1;  // conditional statement in main() can now do something based on the event detection
                              // we can also use actual system kernel event flags, but this is simpler (for now)
 }

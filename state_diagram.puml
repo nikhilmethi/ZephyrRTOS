@@ -1,12 +1,68 @@
 @startuml
+[*] --> INIT
 
-[*] -> example_state
-
-state example_state {
-    example_state_entry -> example_state_run
-    example_state_run : Do Stuff
-    example_state_run -> example_state_exit : Event Trigger
-    example_state_exit : Do Exit Stuff
+state INIT {
+    init_run: Check GPIO0 interface
+    init_run: Initialize all LEDs and buttons
+    init_run: Configure interrupts + callbacks for all 4 buttons
+    init_run: Initialize action_freq_hz = 2 and action_phase (out-of-phase)
 }
 
+INIT -d-> DEFAULTS : init_ok
+
+state DEFAULTS {
+    default_run: Restore default action_freq_hz = 2 Hz
+    default_run: Restore out-of-phase action_phase baseline
+    default_run: Ensure error LED OFF
+    default_run: Enable sleep/freq interrupts (reset remains enabled always)
+}
+
+DEFAULTS --> AWAKE : Successful completion
+state AWAKE {
+    awake_run : Action LEDs out-of-phase @ action_freq_hz (issue LOG_INF on toggle)
+    awake_run : Check for freq_up, freq_down, sleep, reset events
+}
+
+AWAKE --> UP : Freq_up_button
+AWAKE --> DOWN : Freq_down_button
+AWAKE --> SLEEP : Sleep_button
+AWAKE --> DEFAULTS : Reset_button
+
+state UP {
+    up_entry : action_freq_hz += 1
+    up_entry : LOG_INF(new freq)
+    up_entry : Check bounds (valid 1..5 Hz)
+}
+
+UP --> AWAKE : In range (1..5)
+UP --> ERROR : Out of range (>5)
+
+state DOWN {
+    down_entry : action_freq_hz -= 1
+    down_entry : LOG_INF(new freq)
+    down_entry : Check bounds (valid 1..5 Hz)
+}
+
+DOWN --> AWAKE : In range (1..5)
+DOWN --> ERROR : Out of range (<1)
+
+state SLEEP {
+    sleep_entry : Store freq + phase
+    sleep_entry : Disable action LEDs (buzzer OFF, ivpump OFF)
+    sleep_entry --> sleep_run
+    sleep_run : Wait for button input
+    sleep_run : Sleep_button restores stored freq + phase and resumes
+}
+
+SLEEP --> DEFAULTS : Reset_button
+SLEEP --> AWAKE : Sleep_button
+
+state ERROR {
+    error_entry : Disable action LEDs (buzzer OFF, ivpump OFF)
+    error_entry : Turn error LED ON (continuous)
+    error_entry : Disable sleep/freq buttons (interrupts disabled)
+    error_entry : Issue LOG_ERR(descriptive)
+}
+
+ERROR --> DEFAULTS : Reset_button (restore defaults + re-enable ints)
 @enduml
