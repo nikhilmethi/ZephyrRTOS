@@ -89,7 +89,13 @@ int main(void)
         // gpio_pin_toggle_dt() - toggle the state of a pin (e.g. gpio_pin_toggle_dt(&led0))
     
         int64_t current_time = k_uptime_get();  // get the current time in milliseconds
-        
+
+        // Heartbeat (independent of state)
+        if (current_time - heartbeat.next_toggle_ms > HEARTBEAT_TOGGLE_INTERVAL_MS) {
+            gpio_pin_toggle_dt(&heartbeat_led);
+            heartbeat.next_toggle_ms = current_time;
+            LOG_INF("Heartbeat toggle");
+        }
 
         switch (state) {
             case INIT:
@@ -208,7 +214,7 @@ int main(void)
                 break;
 
 
-            case AWAKE:
+            case AWAKE: {
                 // Heartbeat (temporarily in this state)
                 if (current_time - heartbeat.next_toggle_ms > HEARTBEAT_TOGGLE_INTERVAL_MS) {
                     gpio_pin_toggle_dt(&heartbeat_led);
@@ -234,6 +240,7 @@ int main(void)
                 // Bounds check: enter ERROR if out of range
                 if (action_freq_hz < ACTION_FREQ_MIN_HZ || action_freq_hz > ACTION_FREQ_MAX_HZ) {
                     state = ERROR;
+                    break;
                 }
 
                 // Action LEDs (out-of-phase)
@@ -256,7 +263,7 @@ int main(void)
                             action_freq_hz, action_phase);
                 }
                 break;
-
+            }
             case SLEEP:
                 // placeholder for now
                 break;
@@ -288,28 +295,49 @@ int main(void)
 
                 // Do nothing else; wait for reset (handled via reset event logic next commit or already global)
                 break;
-
-
-            //case SLEEP:
-                // want to change what the buttons do in a different state?
-                // gpio_remove_callback_dt(button_gpio_struct, &original_button_cb);
-                // gpio_add_callback_dt(button_gpio_struct, &new_button_cb);
-            
-                // OR, want to disable the button entirely?
-                // gpio_pin_interrupt_configure_dt(&sw0, GPIO_INT_DISABLE);
-            //default:
-                // handle unexpected state
-                //break;
         }
 
-        // test for the callback event state in your code
-        //if (sleep_button_event) {
-            // do something based on the event
-            //state = SLEEP;
-            //sleep_button_event = 0;  // clear the event after taking action
-        //} 
+        // Global sleep handling
+        if (sleep_button_event) {
+            sleep_button_event = 0;
 
-        // ---- Global reset handling (works from any state) ----
+            if (state == AWAKE) {
+                // Enter sleep
+                stored_action_freq_hz = action_freq_hz;
+                stored_action_phase = action_phase;
+
+                gpio_pin_set_dt(&iv_pump_led, 0);
+                gpio_pin_set_dt(&buzzer_led, 0);
+
+                LOG_INF("Entered SLEEP (stored freq=%d, phase=%d)",
+                        stored_action_freq_hz, stored_action_phase);
+
+                state = SLEEP;
+            }
+            else if (state == SLEEP) {
+                // Exit sleep
+                action_freq_hz = stored_action_freq_hz;
+                action_phase = stored_action_phase;
+
+                // Restore immediate LED state
+                if (action_phase == 0) {
+                    gpio_pin_set_dt(&iv_pump_led, 1);
+                    gpio_pin_set_dt(&buzzer_led, 0);
+                } else {
+                    gpio_pin_set_dt(&iv_pump_led, 0);
+                    gpio_pin_set_dt(&buzzer_led, 1);
+                }
+
+                action.next_toggle_ms = current_time;
+
+                LOG_INF("Exited SLEEP (freq=%d, phase=%d)",
+                        action_freq_hz, action_phase);
+
+                state = AWAKE;
+            }
+        }
+
+        // Global reset handling (works from any state) 
         if (reset_button_event) {
             reset_button_event = 0;
 
