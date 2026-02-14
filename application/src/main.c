@@ -216,7 +216,7 @@ int main(void)
                     LOG_INF("Heartbeat toggle");
                 }
 
-                // ---- Frequency button handling (AWAKE only) ----
+                // Frequency button handling (AWAKE only)
                 if (freq_up_button_event) {
                     freq_up_button_event = 0;
                     action_freq_hz += FREQ_UP_INC_HZ;
@@ -231,6 +231,10 @@ int main(void)
                     LOG_INF("FREQ_DOWN -> %d Hz", action_freq_hz);
                 }
 
+                // Bounds check: enter ERROR if out of range
+                if (action_freq_hz < ACTION_FREQ_MIN_HZ || action_freq_hz > ACTION_FREQ_MAX_HZ) {
+                    state = ERROR;
+                }
 
                 // Action LEDs (out-of-phase)
                 int32_t half_period_ms = 1000 / (2 * action_freq_hz);
@@ -258,7 +262,31 @@ int main(void)
                 break;
 
             case ERROR:
-                // placeholder for now
+                if (!error_entered) {
+                    // Stop action LEDs
+                    gpio_pin_set_dt(&iv_pump_led, 0);
+                    gpio_pin_set_dt(&buzzer_led, 0);
+
+                    // Turn error LED ON solid
+                    gpio_pin_set_dt(&error_led, 1);
+
+                    // Disable sleep/freq interrupts (reset remains enabled)
+                    gpio_pin_interrupt_configure_dt(&sleep_button, GPIO_INT_DISABLE);
+                    gpio_pin_interrupt_configure_dt(&freq_up_button, GPIO_INT_DISABLE);
+                    gpio_pin_interrupt_configure_dt(&freq_down_button, GPIO_INT_DISABLE);
+
+                    LOG_ERR("ERROR: action_freq out of range (%d Hz)", action_freq_hz);
+                    error_entered = true;
+                }
+
+                // Keep heartbeat going in ERROR (until moved it outside the switch later)
+                if (current_time - heartbeat.next_toggle_ms > HEARTBEAT_TOGGLE_INTERVAL_MS) {
+                    gpio_pin_toggle_dt(&heartbeat_led);
+                    heartbeat.next_toggle_ms = current_time;
+                    LOG_INF("Heartbeat toggle");
+                }
+
+                // Do nothing else; wait for reset (handled via reset event logic next commit or already global)
                 break;
 
 
@@ -281,7 +309,30 @@ int main(void)
             //sleep_button_event = 0;  // clear the event after taking action
         //} 
 
-    
+        // ---- Global reset handling (works from any state) ----
+        if (reset_button_event) {
+            reset_button_event = 0;
+
+            // clear ERROR latch so ERROR actions can run again next time
+            error_entered = false;
+
+            // clear error LED now (DEFAULTS will also do this)
+            gpio_pin_set_dt(&error_led, 0);
+
+            // re-enable interrupts (DEFAULTS will also do this, but enabling here is fine too)
+            gpio_pin_interrupt_configure_dt(&sleep_button, GPIO_INT_EDGE_TO_ACTIVE);
+            gpio_pin_interrupt_configure_dt(&freq_up_button, GPIO_INT_EDGE_TO_ACTIVE);
+            gpio_pin_interrupt_configure_dt(&freq_down_button, GPIO_INT_EDGE_TO_ACTIVE);
+
+            // clear other pending events
+            sleep_button_event = 0;
+            freq_up_button_event = 0;
+            freq_down_button_event = 0;
+
+            LOG_INF("Reset pressed -> DEFAULTS");
+            state = DEFAULTS;
+        }
+
         k_msleep(10);  // include a very short sleep statement to allow any LOG messages to be printed
     }
 }
