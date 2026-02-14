@@ -1,12 +1,61 @@
 @startuml
+[*] --> INIT
 
-[*] -> example_state
-
-state example_state {
-    example_state_entry -> example_state_run
-    example_state_run : Do Stuff
-    example_state_run -> example_state_exit : Event Trigger
-    example_state_exit : Do Exit Stuff
+state INIT {
+    init_run: Check GPIO0 interface
+    init_run: Initialize all LEDs and buttons
 }
 
+INIT --> DEFAULTS : init_ok
+
+state DEFAULTS {
+    default_run: Set heartbeat to 1 Hz (issue LOG_INF statement)
+    default_run: Set buzzer and ivpump out of phase at 2 Hz (issue LOG_INF statement)
+}
+
+DEFAULTS --> AWAKE
+
+state AWAKE {
+    awake_run : Check for freq_up and freq_down
+    awake_run : Action LEDs out-of-phase @ action_freq_hz (issue LOG_INF on toggle)
+}
+
+AWAKE --> UP : Freq_up_button pressed
+
+state UP {
+    up_entry : Check if action_freq_hz < 5
+    up_entry --> up_run : action_freq_hz < 5
+    up_run : action_freq_hz += 1
+    up_entry --> ERROR : action_freq_hz >= 5
+}
+
+AWAKE --> DOWN : Freq_up_button
+
+state DOWN {
+    down_entry : Check if action_freq_hz > 1
+    down_entry --> down_run : action_freq_hz > 1
+    down_run : action_freq_hz -= 1
+    down_entry --> ERROR : action_freq_hz <= 1
+}
+
+AWAKE --> SLEEP : Sleep_button
+
+state SLEEP {
+    sleep_entry : Store freq + phase
+    sleep_entry : Disable action LEDs
+    sleep_run : Wait for button input
+}
+
+SLEEP --> DEFAULTS : Reset_button
+SLEEP --> AWAKE : Sleep_button
+
+state ERROR {
+    error_entry : Disable action LEDs
+    error_entry : Turn error LED on
+}
+
+ERROR : action LEDs OFF\nerror LED ON\nDisable sleep/freq ints\nheartbeat continues\nLOG_ERR
+ERROR --> AWAKE : reset_button (defaults + re-enable ints)
+
+NORMAL --> AWAKE : reset_button (defaults)
 @enduml
