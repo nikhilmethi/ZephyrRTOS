@@ -310,7 +310,47 @@ int main(void)
             //sleep_button_event = 0;  // clear the event after taking action
         //} 
 
-        // ---- Global reset handling (works from any state) ----
+        // Global sleep handling
+        if (sleep_button_event) {
+            sleep_button_event = 0;
+
+            if (state == AWAKE) {
+                // Enter sleep
+                stored_action_freq_hz = action_freq_hz;
+                stored_action_phase = action_phase;
+
+                gpio_pin_set_dt(&iv_pump_led, 0);
+                gpio_pin_set_dt(&buzzer_led, 0);
+
+                LOG_INF("Entered SLEEP (stored freq=%d, phase=%d)",
+                        stored_action_freq_hz, stored_action_phase);
+
+                state = SLEEP;
+            }
+            else if (state == SLEEP) {
+                // Exit sleep
+                action_freq_hz = stored_action_freq_hz;
+                action_phase = stored_action_phase;
+
+                // Restore immediate LED state
+                if (action_phase == 0) {
+                    gpio_pin_set_dt(&iv_pump_led, 1);
+                    gpio_pin_set_dt(&buzzer_led, 0);
+                } else {
+                    gpio_pin_set_dt(&iv_pump_led, 0);
+                    gpio_pin_set_dt(&buzzer_led, 1);
+                }
+
+                action.next_toggle_ms = current_time;
+
+                LOG_INF("Exited SLEEP (freq=%d, phase=%d)",
+                        action_freq_hz, action_phase);
+
+                state = AWAKE;
+            }
+        }
+
+        // Global reset handling (works from any state) 
         if (reset_button_event) {
             reset_button_event = 0;
 
