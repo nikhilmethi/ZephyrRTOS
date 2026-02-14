@@ -216,6 +216,22 @@ int main(void)
                     LOG_INF("Heartbeat toggle");
                 }
 
+                // ---- Frequency button handling (AWAKE only) ----
+                if (freq_up_button_event) {
+                    freq_up_button_event = 0;
+                    action_freq_hz += FREQ_UP_INC_HZ;
+                    action.next_toggle_ms = current_time;   // apply new rate immediately
+                    LOG_INF("FREQ_UP -> %d Hz", action_freq_hz);
+                }
+
+                if (freq_down_button_event) {
+                    freq_down_button_event = 0;
+                    action_freq_hz -= FREQ_DOWN_INC_HZ;
+                    action.next_toggle_ms = current_time;   // apply new rate immediately
+                    LOG_INF("FREQ_DOWN -> %d Hz", action_freq_hz);
+                }
+
+
                 // Action LEDs (out-of-phase)
                 int32_t half_period_ms = 1000 / (2 * action_freq_hz);
 
