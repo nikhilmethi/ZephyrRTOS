@@ -2,7 +2,7 @@
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
 #include <zephyr/drivers/gpio.h> 
-#include <zephyr/logging/log.h>  // needs CONFIG_LOG=y in your prj.conf
+#include <zephyr/logging/log.h>
 // #include <zephyr/drivers/adc.h> // CONFIG_ADC=y
 // #include <zephyr/drivers/pwm.h> // CONFIG_PWM=y
 // #include <zephyr/smf.h> // CONFIG_SMF=y
@@ -22,7 +22,6 @@ LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
 // declare function prototypes
 
 // define globals and DT-based hardware structs
-//static const struct gpio_dt_spec heartbeat_led = GPIO_DT_SPEC_GET(DT_ALIAS(heartbeat), gpios);
 static const struct gpio_dt_spec heartbeat_led = GPIO_DT_SPEC_GET(DT_ALIAS(heartbeat), gpios);
 static const struct gpio_dt_spec iv_pump_led = GPIO_DT_SPEC_GET(DT_ALIAS(ivpump), gpios);
 static const struct gpio_dt_spec buzzer_led = GPIO_DT_SPEC_GET(DT_ALIAS(buzzer), gpios);
@@ -44,21 +43,21 @@ void freq_up_button_callback(const struct device *dev, struct gpio_callback *cb,
 void freq_down_button_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins);
 
 // initialize GPIO Callback Structs
-static struct gpio_callback sleep_button_cb;  // example; need one per callback (button)  
-static struct gpio_callback reset_button_cb;  // example; need one per callback (button)  
-static struct gpio_callback freq_up_button_cb;  // example; need one per callback (button)  
-static struct gpio_callback freq_down_button_cb;  // example; need one per callback (button)  
+static struct gpio_callback sleep_button_cb; 
+static struct gpio_callback reset_button_cb;   
+static struct gpio_callback freq_up_button_cb;   
+static struct gpio_callback freq_down_button_cb; 
 
-// define states for state machine (THESE ARE ONLY PLACEHOLDERS)
+// define states for state machine
 enum states { INIT, DEFAULTS, AWAKE, SLEEP, ERROR };
 static int state = INIT;
 
-// Timing / LED state
+// Timing / LED state setup
 typedef struct {
     int64_t next_toggle_ms;   // next scheduled toggle time (k_uptime_get() domain)
 } blink_timer_t;
 
-// Heartbeat (independent of app state)
+// Heartbeat (independent of state)
 static blink_timer_t heartbeat = { .next_toggle_ms = 0 };
 
 // Action LEDs (buzzer + ivpump) are a coordinated out-of-phase pair
@@ -78,16 +77,9 @@ static bool error_entered = false;
 
 int main(void)
 {
-    /* below are some functional examples to get you started, but this is 
-       just a starting point, not a complete program! */
-
-
     while (1) {
         // run the state machine in this indefinite loop
 
-        // some useful functions
-        // gpio_pin_toggle_dt() - toggle the state of a pin (e.g. gpio_pin_toggle_dt(&led0))
-    
         int64_t current_time = k_uptime_get();  // get the current time in milliseconds
 
         // Heartbeat (independent of state)
@@ -105,7 +97,7 @@ int main(void)
                     return -1;  // exit code that will exit main()
                 }
 
-                // configure GPIO pin
+                // configure GPIO pins
                 int err = gpio_pin_configure_dt(&sleep_button, GPIO_INPUT);
                 if (err < 0) {
                     LOG_ERR("Cannot configure sleep button.");
@@ -215,12 +207,6 @@ int main(void)
 
 
             case AWAKE: {
-                // Heartbeat (temporarily in this state)
-                if (current_time - heartbeat.next_toggle_ms > HEARTBEAT_TOGGLE_INTERVAL_MS) {
-                    gpio_pin_toggle_dt(&heartbeat_led);
-                    heartbeat.next_toggle_ms = current_time;
-                    LOG_INF("Heartbeat toggle");
-                }
 
                 // Frequency button handling (AWAKE only)
                 if (freq_up_button_event) {
@@ -265,7 +251,7 @@ int main(void)
                 break;
             }
             case SLEEP:
-                // placeholder for now
+                // Handled externally
                 break;
 
             case ERROR:
@@ -274,7 +260,7 @@ int main(void)
                     gpio_pin_set_dt(&iv_pump_led, 0);
                     gpio_pin_set_dt(&buzzer_led, 0);
 
-                    // Turn error LED ON solid
+                    // Turn error LED on
                     gpio_pin_set_dt(&error_led, 1);
 
                     // Disable sleep/freq interrupts (reset remains enabled)
@@ -285,15 +271,6 @@ int main(void)
                     LOG_ERR("ERROR: action_freq out of range (%d Hz)", action_freq_hz);
                     error_entered = true;
                 }
-
-                // Keep heartbeat going in ERROR (until moved it outside the switch later)
-                if (current_time - heartbeat.next_toggle_ms > HEARTBEAT_TOGGLE_INTERVAL_MS) {
-                    gpio_pin_toggle_dt(&heartbeat_led);
-                    heartbeat.next_toggle_ms = current_time;
-                    LOG_INF("Heartbeat toggle");
-                }
-
-                // Do nothing else; wait for reset (handled via reset event logic next commit or already global)
                 break;
         }
 
@@ -337,17 +314,17 @@ int main(void)
             }
         }
 
-        // Global reset handling (works from any state) 
+        // Global reset handling
         if (reset_button_event) {
             reset_button_event = 0;
 
             // clear ERROR latch so ERROR actions can run again next time
             error_entered = false;
 
-            // clear error LED now (DEFAULTS will also do this)
+            // clear error LED
             gpio_pin_set_dt(&error_led, 0);
 
-            // re-enable interrupts (DEFAULTS will also do this, but enabling here is fine too)
+            // re-enable interrupts
             gpio_pin_interrupt_configure_dt(&sleep_button, GPIO_INT_EDGE_TO_ACTIVE);
             gpio_pin_interrupt_configure_dt(&freq_up_button, GPIO_INT_EDGE_TO_ACTIVE);
             gpio_pin_interrupt_configure_dt(&freq_down_button, GPIO_INT_EDGE_TO_ACTIVE);
