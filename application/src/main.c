@@ -21,6 +21,12 @@ LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
 #define ACTION_FREQ_MAX_HZ 5
 
 // declare function prototypes
+void heartbeat_timer_handler(struct k_timer *t);
+K_TIMER_DEFINE(heartbeat_timer, heartbeat_timer_handler, NULL);
+
+void action_timer_handler(struct k_timer *t);
+void action_timer_stop(struct k_timer *t);
+K_TIMER_DEFINE(action_timer, action_timer_handler, action_timer_stop);
 
 // define globals and DT-based hardware structs
 
@@ -29,6 +35,12 @@ static inline uint64_t now_ns(void)
     int64_t ticks = k_uptime_ticks();
     return k_ticks_to_ns_near64(ticks);
 }
+
+static inline int32_t action_half_period_ms(int freq_hz)
+{
+    return 1000 / (2 * freq_hz);
+}
+
 static const struct gpio_dt_spec heartbeat_led = GPIO_DT_SPEC_GET(DT_ALIAS(heartbeat), gpios);
 static const struct gpio_dt_spec iv_pump_led = GPIO_DT_SPEC_GET(DT_ALIAS(ivpump), gpios);
 static const struct gpio_dt_spec buzzer_led = GPIO_DT_SPEC_GET(DT_ALIAS(buzzer), gpios);
@@ -43,8 +55,6 @@ static atomic_t reset_button_event = ATOMIC_INIT(0);
 static atomic_t freq_up_button_event = ATOMIC_INIT(0);
 static atomic_t freq_down_button_event = ATOMIC_INIT(0);
 
-void heartbeat_timer_handler(struct k_timer *t);
-K_TIMER_DEFINE(heartbeat_timer, heartbeat_timer_handler, NULL);
 // define callback functions
 void sleep_button_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins);
 void reset_button_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins);
@@ -60,14 +70,6 @@ static struct gpio_callback freq_down_button_cb;
 // define states for state machine
 enum states { INIT, DEFAULTS, AWAKE, SLEEP, ERROR };
 static int state = INIT;
-
-// Timing / LED state setup
-typedef struct {
-    int64_t next_toggle_ms;   // next scheduled toggle time (k_uptime_get() domain)
-} blink_timer_t;
-
-// Action LEDs (buzzer + ivpump) are a coordinated out-of-phase pair
-static blink_timer_t action = { .next_toggle_ms = 0 };
 
 // action_phase == 0: ivpump ON, buzzer OFF
 // action_phase == 1: ivpump OFF, buzzer ON
@@ -200,63 +202,50 @@ int main(void)
                 gpio_pin_set_dt(&buzzer_led, 0);
 
                 // initialize timing for future action blinking
-                action.next_toggle_ms = current_time;
+                int32_t hp = action_half_period_ms(action_freq_hz);
+                k_timer_start(&action_timer, K_MSEC(hp), K_MSEC(hp));
 
                 LOG_INF("DEFAULTS: action_freq=%d Hz, phase=%d @ %llu ns",
                     action_freq_hz, action_phase, now_ns());
 
                 state = AWAKE;
                 break;
-
-
+           
             case AWAKE: {
-
                 // Frequency button handling (AWAKE only)
+                bool freq_changed = false;
+
                 if (atomic_cas(&freq_up_button_event, 1, 0)) {
                     action_freq_hz += FREQ_UP_INC_HZ;
-                    action.next_toggle_ms = current_time;   // apply new rate immediately
+                    freq_changed = true;
                     LOG_INF("FREQ_UP -> %d Hz @ %llu ns", action_freq_hz, now_ns());
                 }
 
                 if (atomic_cas(&freq_down_button_event, 1, 0)) {
                     action_freq_hz -= FREQ_DOWN_INC_HZ;
-                    action.next_toggle_ms = current_time;   // apply new rate immediately
+                    freq_changed = true;
                     LOG_INF("FREQ_DOWN -> %d Hz @ %llu ns", action_freq_hz, now_ns());
                 }
 
-                // Bounds check: enter ERROR if out of range
                 if (action_freq_hz < ACTION_FREQ_MIN_HZ || action_freq_hz > ACTION_FREQ_MAX_HZ) {
                     state = ERROR;
                     break;
                 }
 
-                // Action LEDs (out-of-phase)
-                int32_t half_period_ms = 1000 / (2 * action_freq_hz);
-
-                if (current_time >= action.next_toggle_ms) {
-                    action_phase = !action_phase;
-
-                    if (action_phase == 0) {
-                        gpio_pin_set_dt(&iv_pump_led, 1);
-                        gpio_pin_set_dt(&buzzer_led, 0);
-                    } else {
-                        gpio_pin_set_dt(&iv_pump_led, 0);
-                        gpio_pin_set_dt(&buzzer_led, 1);
-                    }
-
-                    action.next_toggle_ms = current_time + (int64_t) half_period_ms;
-
-                    LOG_INF("ACTION toggle (freq=%d Hz, phase=%d) @ %llu ns",
-                        action_freq_hz, action_phase, now_ns());
+                if (freq_changed) {
+                    int32_t hp = action_half_period_ms(action_freq_hz);
+                    k_timer_start(&action_timer, K_MSEC(hp), K_MSEC(hp));
                 }
                 break;
             }
+            
             case SLEEP:
                 // Handled externally
                 break;
 
             case ERROR:
                 if (!error_entered) {
+                    k_timer_stop(&action_timer);
                     // Stop action LEDs
                     gpio_pin_set_dt(&iv_pump_led, 0);
                     gpio_pin_set_dt(&buzzer_led, 0);
@@ -283,6 +272,7 @@ int main(void)
                 stored_action_freq_hz = action_freq_hz;
                 stored_action_phase = action_phase;
 
+                k_timer_stop(&action_timer);
                 gpio_pin_set_dt(&iv_pump_led, 0);
                 gpio_pin_set_dt(&buzzer_led, 0);
 
@@ -296,7 +286,7 @@ int main(void)
                 action_freq_hz = stored_action_freq_hz;
                 action_phase = stored_action_phase;
 
-                // Restore immediate LED state
+                // Restore immediate LED state first
                 if (action_phase == 0) {
                     gpio_pin_set_dt(&iv_pump_led, 1);
                     gpio_pin_set_dt(&buzzer_led, 0);
@@ -305,7 +295,9 @@ int main(void)
                     gpio_pin_set_dt(&buzzer_led, 1);
                 }
 
-                action.next_toggle_ms = current_time;
+                // Then start the timer
+                int32_t hp = action_half_period_ms(action_freq_hz);
+                k_timer_start(&action_timer, K_MSEC(hp), K_MSEC(hp));
 
                 LOG_INF("Exited SLEEP (freq=%d, phase=%d) @ %llu ns",
                     action_freq_hz, action_phase, now_ns());
@@ -339,10 +331,33 @@ int main(void)
     }
 }
 
+// define timer functions
 void heartbeat_timer_handler(struct k_timer *t)
 {
     gpio_pin_toggle_dt(&heartbeat_led);
     LOG_INF("Heartbeat toggle @ %llu ns", now_ns());
+}
+
+void action_timer_handler(struct k_timer *t)
+{
+    action_phase = !action_phase;
+
+    if (action_phase == 0) {
+        gpio_pin_set_dt(&iv_pump_led, 1);
+        gpio_pin_set_dt(&buzzer_led, 0);
+    } else {
+        gpio_pin_set_dt(&iv_pump_led, 0);
+        gpio_pin_set_dt(&buzzer_led, 1);
+    }
+
+    LOG_INF("ACTION toggle (freq=%d Hz, phase=%d) @ %llu ns",
+            action_freq_hz, action_phase, now_ns());
+}
+
+void action_timer_stop(struct k_timer *t)
+{
+    gpio_pin_set_dt(&iv_pump_led, 0);
+    gpio_pin_set_dt(&buzzer_led, 0);
 }
 
 // define callback functions
