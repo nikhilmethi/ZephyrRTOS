@@ -70,6 +70,7 @@ static struct gpio_callback freq_down_button_cb;
 // define states for state machine
 enum states { INIT, DEFAULTS, AWAKE, SLEEP, ERROR };
 static int state = INIT;
+static enum states prev_state = INIT;
 
 // action_phase == 0: ivpump ON, buzzer OFF
 // action_phase == 1: ivpump OFF, buzzer ON
@@ -82,14 +83,32 @@ static bool stored_action_phase = 0;                    // for sleep restore
 
 static int32_t stored_action_remaining_ms = 0;
 
-// ERROR state entry latch
-static bool error_entered = false;
-
 int main(void)
 {
     while (1) {
         // run the state machine in this indefinite loop
+        if (state != prev_state) {
+            /* ENTRY actions */
+            if (state == ERROR) {
+                k_timer_stop(&action_timer);
 
+                gpio_pin_set_dt(&iv_pump_led, 0);
+                gpio_pin_set_dt(&buzzer_led, 0);
+                gpio_pin_set_dt(&error_led, 1);
+
+                gpio_pin_interrupt_configure_dt(&sleep_button, GPIO_INT_DISABLE);
+                gpio_pin_interrupt_configure_dt(&freq_up_button, GPIO_INT_DISABLE);
+                gpio_pin_interrupt_configure_dt(&freq_down_button, GPIO_INT_DISABLE);
+
+                LOG_ERR("ERROR: action_freq out of range (%d Hz) @ %llu ns",
+                        action_freq_hz, now_ns());
+            }
+
+            /* EXIT actions (optional) */
+            /* none needed to preserve behavior */
+
+            prev_state = state;
+        }
         switch (state) {
             case INIT:
                 // check if interface is ready
@@ -167,16 +186,20 @@ int main(void)
                 }
                 // populate CB struct with information about the CB function and pin
                 gpio_init_callback(&sleep_button_cb, sleep_button_callback, BIT(sleep_button.pin)); // associate callback with GPIO pin
-                gpio_add_callback_dt(&sleep_button, &sleep_button_cb);
+                err = gpio_add_callback_dt(&sleep_button, &sleep_button_cb);
+                if (err < 0) { LOG_ERR("Cannot add sleep button callback."); return err; }
 
                 gpio_init_callback(&reset_button_cb, reset_button_callback, BIT(reset_button.pin)); // associate callback with GPIO pin
-                gpio_add_callback_dt(&reset_button, &reset_button_cb);
+                err = gpio_add_callback_dt(&reset_button, &reset_button_cb);
+                if (err < 0) { LOG_ERR("Cannot add reset button callback."); return err; }
 
                 gpio_init_callback(&freq_up_button_cb, freq_up_button_callback, BIT(freq_up_button.pin));
-                gpio_add_callback_dt(&freq_up_button, &freq_up_button_cb);
+                err = gpio_add_callback_dt(&freq_up_button, &freq_up_button_cb);
+                if (err < 0) { LOG_ERR("Cannot add freq_up button callback."); return err; }
 
                 gpio_init_callback(&freq_down_button_cb, freq_down_button_callback, BIT(freq_down_button.pin));
-                gpio_add_callback_dt(&freq_down_button, &freq_down_button_cb);
+                err = gpio_add_callback_dt(&freq_down_button, &freq_down_button_cb);
+                if (err < 0) { LOG_ERR("Cannot add freq_down button callback."); return err; }
 
                 k_timer_start(&heartbeat_timer,
                 K_MSEC(HEARTBEAT_TOGGLE_INTERVAL_MS),
@@ -194,8 +217,6 @@ int main(void)
                 stored_action_phase = action_phase;
                 stored_action_remaining_ms = 0;
 
-                // clear error state / indicators
-                error_entered = false;
                 gpio_pin_set_dt(&error_led, 0);
 
                 // set immediate out-of-phase outputs (baseline)
@@ -242,28 +263,11 @@ int main(void)
             }
             
             case SLEEP:
-                // Handled externally
+                // No per-loop actions: sleep/wake handled by global button event logic after switch
                 break;
 
             case ERROR:
-                if (!error_entered) {
-                    k_timer_stop(&action_timer);
-                    // Stop action LEDs
-                    gpio_pin_set_dt(&iv_pump_led, 0);
-                    gpio_pin_set_dt(&buzzer_led, 0);
-
-                    // Turn error LED on
-                    gpio_pin_set_dt(&error_led, 1);
-
-                    // Disable sleep/freq interrupts (reset remains enabled)
-                    gpio_pin_interrupt_configure_dt(&sleep_button, GPIO_INT_DISABLE);
-                    gpio_pin_interrupt_configure_dt(&freq_up_button, GPIO_INT_DISABLE);
-                    gpio_pin_interrupt_configure_dt(&freq_down_button, GPIO_INT_DISABLE);
-
-                    LOG_ERR("ERROR: action_freq out of range (%d Hz) @ %llu ns",
-                        action_freq_hz, now_ns());
-                    error_entered = true;
-                }
+                /* RUN is intentionally empty; system waits for reset */
                 break;
         }
 
@@ -322,8 +326,6 @@ int main(void)
 
         // Global reset handling
         if (atomic_cas(&reset_button_event, 1, 0)) {
-            // clear ERROR latch so ERROR actions can run again next time
-            error_entered = false;
 
             // clear error LED
             gpio_pin_set_dt(&error_led, 0);
