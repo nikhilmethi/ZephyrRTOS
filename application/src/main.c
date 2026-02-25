@@ -89,7 +89,7 @@ int main(void)
 {
     while (1) {
         // run the state machine in this indefinite loop
-        
+
         switch (state) {
             case INIT:
                 // check if interface is ready
@@ -192,6 +192,7 @@ int main(void)
 
                 stored_action_freq_hz = action_freq_hz;
                 stored_action_phase = action_phase;
+                stored_action_remaining_ms = 0;
 
                 // clear error state / indicators
                 error_entered = false;
@@ -202,6 +203,7 @@ int main(void)
                 gpio_pin_set_dt(&buzzer_led, 0);
 
                 // initialize timing for future action blinking
+                k_timer_stop(&action_timer);
                 int32_t hp = action_half_period_ms(action_freq_hz);
                 k_timer_start(&action_timer, K_MSEC(hp), K_MSEC(hp));
 
@@ -334,7 +336,8 @@ int main(void)
             atomic_set(&sleep_button_event, 0);
             atomic_set(&freq_up_button_event, 0);
             atomic_set(&freq_down_button_event, 0);
-
+            
+            k_timer_stop(&action_timer);
             LOG_INF("Reset pressed -> DEFAULTS @ %llu ns", now_ns());
             state = DEFAULTS;
         }
