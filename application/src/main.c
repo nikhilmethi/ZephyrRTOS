@@ -80,6 +80,8 @@ static int action_freq_hz = LED_BLINK_FREQ_HZ;          // current
 static int stored_action_freq_hz = LED_BLINK_FREQ_HZ;   // for sleep restore
 static bool stored_action_phase = 0;                    // for sleep restore
 
+static int32_t stored_action_remaining_ms = 0;
+
 // ERROR state entry latch
 static bool error_entered = false;
 
@@ -87,9 +89,7 @@ int main(void)
 {
     while (1) {
         // run the state machine in this indefinite loop
-
-        int64_t current_time = k_uptime_get();  // get the current time in milliseconds
-
+        
         switch (state) {
             case INIT:
                 // check if interface is ready
@@ -272,12 +272,15 @@ int main(void)
                 stored_action_freq_hz = action_freq_hz;
                 stored_action_phase = action_phase;
 
+                // Save remaining time in the current half-period BEFORE stopping
+                stored_action_remaining_ms = k_timer_remaining_get(&action_timer);
+
                 k_timer_stop(&action_timer);
                 gpio_pin_set_dt(&iv_pump_led, 0);
                 gpio_pin_set_dt(&buzzer_led, 0);
 
-                LOG_INF("Entered SLEEP (stored freq=%d, phase=%d) @ %llu ns",
-                    stored_action_freq_hz, stored_action_phase, now_ns());
+                LOG_INF("Entered SLEEP (stored freq=%d, phase=%d, rem=%d ms) @ %llu ns",
+                    stored_action_freq_hz, stored_action_phase, stored_action_remaining_ms, now_ns());
 
                 state = SLEEP;
             }
@@ -297,10 +300,19 @@ int main(void)
 
                 // Then start the timer
                 int32_t hp = action_half_period_ms(action_freq_hz);
-                k_timer_start(&action_timer, K_MSEC(hp), K_MSEC(hp));
 
-                LOG_INF("Exited SLEEP (freq=%d, phase=%d) @ %llu ns",
-                    action_freq_hz, action_phase, now_ns());
+                // First interval should be whatever time was left when we went to sleep
+                int32_t first_ms = stored_action_remaining_ms;
+
+                // Safety fallback: if it's <=0 or larger than half-period, use half-period
+                if (first_ms <= 0 || first_ms > hp) {
+                    first_ms = hp;
+                }
+
+                k_timer_start(&action_timer, K_MSEC(first_ms), K_MSEC(hp));
+
+                LOG_INF("Exited SLEEP (freq=%d, phase=%d, first=%d ms, hp=%d ms) @ %llu ns",
+                    action_freq_hz, action_phase, first_ms, hp, now_ns());
 
                 state = AWAKE;
             }
