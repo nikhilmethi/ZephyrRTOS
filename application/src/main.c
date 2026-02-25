@@ -43,6 +43,8 @@ static atomic_t reset_button_event = ATOMIC_INIT(0);
 static atomic_t freq_up_button_event = ATOMIC_INIT(0);
 static atomic_t freq_down_button_event = ATOMIC_INIT(0);
 
+void heartbeat_timer_handler(struct k_timer *t);
+K_TIMER_DEFINE(heartbeat_timer, heartbeat_timer_handler, NULL);
 // define callback functions
 void sleep_button_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins);
 void reset_button_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins);
@@ -63,9 +65,6 @@ static int state = INIT;
 typedef struct {
     int64_t next_toggle_ms;   // next scheduled toggle time (k_uptime_get() domain)
 } blink_timer_t;
-
-// Heartbeat (independent of state)
-static blink_timer_t heartbeat = { .next_toggle_ms = 0 };
 
 // Action LEDs (buzzer + ivpump) are a coordinated out-of-phase pair
 static blink_timer_t action = { .next_toggle_ms = 0 };
@@ -88,13 +87,6 @@ int main(void)
         // run the state machine in this indefinite loop
 
         int64_t current_time = k_uptime_get();  // get the current time in milliseconds
-
-        // Heartbeat (independent of state)
-        if (current_time - heartbeat.next_toggle_ms > HEARTBEAT_TOGGLE_INTERVAL_MS) {
-            gpio_pin_toggle_dt(&heartbeat_led);
-            heartbeat.next_toggle_ms = current_time;
-            LOG_INF("Heartbeat toggle @ %llu ns", now_ns());
-        }
 
         switch (state) {
             case INIT:
@@ -184,6 +176,9 @@ int main(void)
                 gpio_init_callback(&freq_down_button_cb, freq_down_button_callback, BIT(freq_down_button.pin));
                 gpio_add_callback_dt(&freq_down_button, &freq_down_button_cb);
 
+                k_timer_start(&heartbeat_timer,
+                K_MSEC(HEARTBEAT_TOGGLE_INTERVAL_MS),
+                K_MSEC(HEARTBEAT_TOGGLE_INTERVAL_MS));
 
                 state = DEFAULTS;  // transition to the next state
                 break;
@@ -342,6 +337,12 @@ int main(void)
 
         k_msleep(10);  // include a very short sleep statement to allow any LOG messages to be printed
     }
+}
+
+void heartbeat_timer_handler(struct k_timer *t)
+{
+    gpio_pin_toggle_dt(&heartbeat_led);
+    LOG_INF("Heartbeat toggle @ %llu ns", now_ns());
 }
 
 // define callback functions
