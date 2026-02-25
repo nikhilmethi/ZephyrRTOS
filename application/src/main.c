@@ -82,6 +82,8 @@ static int stored_action_freq_hz = LED_BLINK_FREQ_HZ;   // for sleep restore
 static bool stored_action_phase = 0;                    // for sleep restore
 
 static int32_t stored_action_remaining_ms = 0;
+static uint64_t hb_last_ns = 0;
+static uint64_t action_last_ns = 0;
 
 int main(void)
 {
@@ -204,6 +206,7 @@ int main(void)
                 k_timer_start(&heartbeat_timer,
                 K_MSEC(HEARTBEAT_TOGGLE_INTERVAL_MS),
                 K_MSEC(HEARTBEAT_TOGGLE_INTERVAL_MS));
+                action_last_ns = 0;
 
                 state = DEFAULTS;  // transition to the next state
                 break;
@@ -227,6 +230,7 @@ int main(void)
                 k_timer_stop(&action_timer);
                 int32_t hp = action_half_period_ms(action_freq_hz);
                 k_timer_start(&action_timer, K_MSEC(hp), K_MSEC(hp));
+                action_last_ns = 0;
 
                 LOG_INF("DEFAULTS: action_freq=%d Hz, phase=%d @ %llu ns",
                     action_freq_hz, action_phase, now_ns());
@@ -258,6 +262,7 @@ int main(void)
                 if (freq_changed) {
                     int32_t hp = action_half_period_ms(action_freq_hz);
                     k_timer_start(&action_timer, K_MSEC(hp), K_MSEC(hp));
+                    action_last_ns = 0;
                 }
                 break;
             }
@@ -316,6 +321,7 @@ int main(void)
                 }
 
                 k_timer_start(&action_timer, K_MSEC(first_ms), K_MSEC(hp));
+                action_last_ns = 0;
 
                 LOG_INF("Exited SLEEP (freq=%d, phase=%d, first=%d ms, hp=%d ms) @ %llu ns",
                     action_freq_hz, action_phase, first_ms, hp, now_ns());
@@ -351,14 +357,23 @@ int main(void)
 // define timer functions
 void heartbeat_timer_handler(struct k_timer *t)
 {
+    uint64_t now = now_ns();
+    if (hb_last_ns != 0) {
+        LOG_INF("heart toggle period (ns): %llu", now - hb_last_ns);
+    }
+    hb_last_ns = now;
     gpio_pin_toggle_dt(&heartbeat_led);
-    LOG_INF("Heartbeat toggle @ %llu ns", now_ns());
 }
 
 void action_timer_handler(struct k_timer *t)
 {
-    action_phase = !action_phase;
+    uint64_t now = now_ns();
+    if (action_last_ns != 0) {
+        LOG_INF("action toggle period (ns): %llu", now - action_last_ns);
+    }
+    action_last_ns = now;
 
+    action_phase = !action_phase;
     if (action_phase == 0) {
         gpio_pin_set_dt(&iv_pump_led, 1);
         gpio_pin_set_dt(&buzzer_led, 0);
@@ -366,9 +381,6 @@ void action_timer_handler(struct k_timer *t)
         gpio_pin_set_dt(&iv_pump_led, 0);
         gpio_pin_set_dt(&buzzer_led, 1);
     }
-
-    LOG_INF("ACTION toggle (freq=%d Hz, phase=%d) @ %llu ns",
-            action_freq_hz, action_phase, now_ns());
 }
 
 void action_timer_stop(struct k_timer *t)
