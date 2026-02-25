@@ -3,6 +3,7 @@
 #include <zephyr/devicetree.h>
 #include <zephyr/drivers/gpio.h> 
 #include <zephyr/logging/log.h>
+#include <zephyr/sys/atomic.h>
 // #include <zephyr/drivers/adc.h> // CONFIG_ADC=y
 // #include <zephyr/drivers/pwm.h> // CONFIG_PWM=y
 // #include <zephyr/smf.h> // CONFIG_SMF=y
@@ -12,7 +13,7 @@ LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
 
 // define macros 
 #define HEARTBEAT_TOGGLE_INTERVAL_MS 500
-#define NOMINAL_BATTERY_VOLT_MV 3000 
+// #define NOMINAL_BATTERY_VOLT_MV 3000 
 #define LED_BLINK_FREQ_HZ 2
 #define FREQ_UP_INC_HZ 1
 #define FREQ_DOWN_INC_HZ 1
@@ -31,10 +32,10 @@ static const struct gpio_dt_spec reset_button = GPIO_DT_SPEC_GET(DT_ALIAS(resetb
 static const struct gpio_dt_spec freq_up_button = GPIO_DT_SPEC_GET(DT_ALIAS(frequpbutton), gpios);
 static const struct gpio_dt_spec freq_down_button = GPIO_DT_SPEC_GET(DT_ALIAS(freqdownbutton), gpios);
 
-bool sleep_button_event = 0;  // flag to indicate that the sleep button has been pressed
-bool reset_button_event = 0;  // flag to indicate that the reset button has been pressed
-bool freq_up_button_event = 0;  // flag to indicate that the freq_up button has been pressed
-bool freq_down_button_event = 0; // flag to indicate that the freq_down button has been pressed
+static atomic_t sleep_button_event = ATOMIC_INIT(0);
+static atomic_t reset_button_event = ATOMIC_INIT(0);
+static atomic_t freq_up_button_event = ATOMIC_INIT(0);
+static atomic_t freq_down_button_event = ATOMIC_INIT(0);
 
 // define callback functions
 void sleep_button_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins);
@@ -209,15 +210,13 @@ int main(void)
             case AWAKE: {
 
                 // Frequency button handling (AWAKE only)
-                if (freq_up_button_event) {
-                    freq_up_button_event = 0;
+                if (atomic_cas(&freq_up_button_event, 1, 0)) {
                     action_freq_hz += FREQ_UP_INC_HZ;
                     action.next_toggle_ms = current_time;   // apply new rate immediately
                     LOG_INF("FREQ_UP -> %d Hz", action_freq_hz);
                 }
 
-                if (freq_down_button_event) {
-                    freq_down_button_event = 0;
+                if (atomic_cas(&freq_down_button_event, 1, 0)) {
                     action_freq_hz -= FREQ_DOWN_INC_HZ;
                     action.next_toggle_ms = current_time;   // apply new rate immediately
                     LOG_INF("FREQ_DOWN -> %d Hz", action_freq_hz);
@@ -243,7 +242,7 @@ int main(void)
                         gpio_pin_set_dt(&buzzer_led, 1);
                     }
 
-                    action.next_toggle_ms = current_time + half_period_ms;
+                    action.next_toggle_ms = current_time + (int64_t) half_period_ms;
 
                     LOG_INF("ACTION toggle (freq=%d Hz, phase=%d)",
                             action_freq_hz, action_phase);
@@ -275,9 +274,7 @@ int main(void)
         }
 
         // Global sleep handling
-        if (sleep_button_event) {
-            sleep_button_event = 0;
-
+        if (atomic_cas(&sleep_button_event, 1, 0)) {
             if (state == AWAKE) {
                 // Enter sleep
                 stored_action_freq_hz = action_freq_hz;
@@ -315,9 +312,7 @@ int main(void)
         }
 
         // Global reset handling
-        if (reset_button_event) {
-            reset_button_event = 0;
-
+        if (atomic_cas(&reset_button_event, 1, 0)) {
             // clear ERROR latch so ERROR actions can run again next time
             error_entered = false;
 
@@ -329,10 +324,9 @@ int main(void)
             gpio_pin_interrupt_configure_dt(&freq_up_button, GPIO_INT_EDGE_TO_ACTIVE);
             gpio_pin_interrupt_configure_dt(&freq_down_button, GPIO_INT_EDGE_TO_ACTIVE);
 
-            // clear other pending events
-            sleep_button_event = 0;
-            freq_up_button_event = 0;
-            freq_down_button_event = 0;
+            atomic_set(&sleep_button_event, 0);
+            atomic_set(&freq_up_button_event, 0);
+            atomic_set(&freq_down_button_event, 0);
 
             LOG_INF("Reset pressed -> DEFAULTS");
             state = DEFAULTS;
@@ -345,24 +339,20 @@ int main(void)
 // define callback functions
 void sleep_button_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
 {
-    sleep_button_event = 1;  // conditional statement in main() can now do something based on the event detection
-                             // we can also use actual system kernel event flags, but this is simpler (for now)
+    atomic_set(&sleep_button_event, 1);  
 }
 
 void reset_button_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
 {
-    reset_button_event = 1;  // conditional statement in main() can now do something based on the event detection
-                             // we can also use actual system kernel event flags, but this is simpler (for now)
+    atomic_set(&reset_button_event, 1); 
 }
 
 void freq_up_button_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
 {
-    freq_up_button_event = 1;  // conditional statement in main() can now do something based on the event detection
-                             // we can also use actual system kernel event flags, but this is simpler (for now)
+    atomic_set(&freq_up_button_event, 1); 
 }
 
 void freq_down_button_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
 {
-    freq_down_button_event = 1;  // conditional statement in main() can now do something based on the event detection
-                             // we can also use actual system kernel event flags, but this is simpler (for now)
-}
+    atomic_set(&freq_down_button_event, 1); 
+} 
