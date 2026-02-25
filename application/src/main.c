@@ -23,6 +23,12 @@ LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
 // declare function prototypes
 
 // define globals and DT-based hardware structs
+
+static inline uint64_t now_ns(void)
+{
+    int64_t ticks = k_uptime_ticks();
+    return k_ticks_to_ns_near64(ticks);
+}
 static const struct gpio_dt_spec heartbeat_led = GPIO_DT_SPEC_GET(DT_ALIAS(heartbeat), gpios);
 static const struct gpio_dt_spec iv_pump_led = GPIO_DT_SPEC_GET(DT_ALIAS(ivpump), gpios);
 static const struct gpio_dt_spec buzzer_led = GPIO_DT_SPEC_GET(DT_ALIAS(buzzer), gpios);
@@ -87,7 +93,7 @@ int main(void)
         if (current_time - heartbeat.next_toggle_ms > HEARTBEAT_TOGGLE_INTERVAL_MS) {
             gpio_pin_toggle_dt(&heartbeat_led);
             heartbeat.next_toggle_ms = current_time;
-            LOG_INF("Heartbeat toggle");
+            LOG_INF("Heartbeat toggle @ %llu ns", now_ns());
         }
 
         switch (state) {
@@ -201,7 +207,8 @@ int main(void)
                 // initialize timing for future action blinking
                 action.next_toggle_ms = current_time;
 
-                LOG_INF("DEFAULTS: action_freq=%d Hz, phase=%d", action_freq_hz, action_phase);
+                LOG_INF("DEFAULTS: action_freq=%d Hz, phase=%d @ %llu ns",
+                    action_freq_hz, action_phase, now_ns());
 
                 state = AWAKE;
                 break;
@@ -213,13 +220,13 @@ int main(void)
                 if (atomic_cas(&freq_up_button_event, 1, 0)) {
                     action_freq_hz += FREQ_UP_INC_HZ;
                     action.next_toggle_ms = current_time;   // apply new rate immediately
-                    LOG_INF("FREQ_UP -> %d Hz", action_freq_hz);
+                    LOG_INF("FREQ_UP -> %d Hz @ %llu ns", action_freq_hz, now_ns());
                 }
 
                 if (atomic_cas(&freq_down_button_event, 1, 0)) {
                     action_freq_hz -= FREQ_DOWN_INC_HZ;
                     action.next_toggle_ms = current_time;   // apply new rate immediately
-                    LOG_INF("FREQ_DOWN -> %d Hz", action_freq_hz);
+                    LOG_INF("FREQ_DOWN -> %d Hz @ %llu ns", action_freq_hz, now_ns());
                 }
 
                 // Bounds check: enter ERROR if out of range
@@ -244,8 +251,8 @@ int main(void)
 
                     action.next_toggle_ms = current_time + (int64_t) half_period_ms;
 
-                    LOG_INF("ACTION toggle (freq=%d Hz, phase=%d)",
-                            action_freq_hz, action_phase);
+                    LOG_INF("ACTION toggle (freq=%d Hz, phase=%d) @ %llu ns",
+                        action_freq_hz, action_phase, now_ns());
                 }
                 break;
             }
@@ -267,7 +274,8 @@ int main(void)
                     gpio_pin_interrupt_configure_dt(&freq_up_button, GPIO_INT_DISABLE);
                     gpio_pin_interrupt_configure_dt(&freq_down_button, GPIO_INT_DISABLE);
 
-                    LOG_ERR("ERROR: action_freq out of range (%d Hz)", action_freq_hz);
+                    LOG_ERR("ERROR: action_freq out of range (%d Hz) @ %llu ns",
+                        action_freq_hz, now_ns());
                     error_entered = true;
                 }
                 break;
@@ -283,8 +291,8 @@ int main(void)
                 gpio_pin_set_dt(&iv_pump_led, 0);
                 gpio_pin_set_dt(&buzzer_led, 0);
 
-                LOG_INF("Entered SLEEP (stored freq=%d, phase=%d)",
-                        stored_action_freq_hz, stored_action_phase);
+                LOG_INF("Entered SLEEP (stored freq=%d, phase=%d) @ %llu ns",
+                    stored_action_freq_hz, stored_action_phase, now_ns());
 
                 state = SLEEP;
             }
@@ -304,8 +312,8 @@ int main(void)
 
                 action.next_toggle_ms = current_time;
 
-                LOG_INF("Exited SLEEP (freq=%d, phase=%d)",
-                        action_freq_hz, action_phase);
+                LOG_INF("Exited SLEEP (freq=%d, phase=%d) @ %llu ns",
+                    action_freq_hz, action_phase, now_ns());
 
                 state = AWAKE;
             }
@@ -328,7 +336,7 @@ int main(void)
             atomic_set(&freq_up_button_event, 0);
             atomic_set(&freq_down_button_event, 0);
 
-            LOG_INF("Reset pressed -> DEFAULTS");
+            LOG_INF("Reset pressed -> DEFAULTS @ %llu ns", now_ns());
             state = DEFAULTS;
         }
 
