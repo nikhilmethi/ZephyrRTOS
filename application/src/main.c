@@ -257,16 +257,50 @@ int main(void)
                 break;
            
             case AWAKE: {
-                // Frequency button handling (AWAKE only)
+                uint32_t ev = k_event_wait(&button_events, BTN_ALL_BITS, true, K_FOREVER);
+
+                /* Reset wins */
+                if (ev & BTN_RESET_BIT) {
+                    gpio_pin_set_dt(&error_led, 0);
+
+                    gpio_pin_interrupt_configure_dt(&sleep_button, GPIO_INT_EDGE_TO_ACTIVE);
+                    gpio_pin_interrupt_configure_dt(&freq_up_button, GPIO_INT_EDGE_TO_ACTIVE);
+                    gpio_pin_interrupt_configure_dt(&freq_down_button, GPIO_INT_EDGE_TO_ACTIVE);
+
+                    k_timer_stop(&action_timer);
+                    LOG_INF("Reset pressed -> DEFAULTS @ %llu ns", now_ns());
+                    state = DEFAULTS;
+                    break;
+                }
+
+                /* Sleep toggle */
+                if (ev & BTN_SLEEP_BIT) {
+                    stored_action_freq_hz = action_freq_hz;
+                    stored_action_phase = action_phase;
+
+                    stored_action_remaining_ms = k_timer_remaining_get(&action_timer);
+
+                    k_timer_stop(&action_timer);
+                    gpio_pin_set_dt(&iv_pump_led, 0);
+                    gpio_pin_set_dt(&buzzer_led, 0);
+
+                    LOG_INF("Entered SLEEP (stored freq=%d, phase=%d, rem=%d ms) @ %llu ns",
+                        stored_action_freq_hz, stored_action_phase, stored_action_remaining_ms, now_ns());
+
+                    state = SLEEP;
+                    break;
+                }
+
+                /* Frequency changes */
                 bool freq_changed = false;
 
-                if (atomic_cas(&freq_up_button_event, 1, 0)) {
+                if (ev & BTN_FREQ_UP_BIT) {
                     action_freq_hz += FREQ_UP_INC_HZ;
                     freq_changed = true;
                     LOG_INF("FREQ_UP -> %d Hz @ %llu ns", action_freq_hz, now_ns());
                 }
 
-                if (atomic_cas(&freq_down_button_event, 1, 0)) {
+                if (ev & BTN_FREQ_DOWN_BIT) {
                     action_freq_hz -= FREQ_DOWN_INC_HZ;
                     freq_changed = true;
                     LOG_INF("FREQ_DOWN -> %d Hz @ %llu ns", action_freq_hz, now_ns());
@@ -282,43 +316,32 @@ int main(void)
                     k_timer_start(&action_timer, K_MSEC(hp), K_MSEC(hp));
                     action_last_ns = 0;
                 }
+
                 break;
             }
-            
-            case SLEEP:
-                // No per-loop actions: sleep/wake handled by global button event logic after switch
-                break;
+            case SLEEP: {
+                uint32_t ev = k_event_wait(&button_events,
+                                        BTN_SLEEP_BIT | BTN_RESET_BIT,
+                                        true,
+                                        K_FOREVER);
 
-            case ERROR:
-                /* RUN is intentionally empty; system waits for reset */
-                break;
-        }
+                if (ev & BTN_RESET_BIT) {
+                    gpio_pin_set_dt(&error_led, 0);
 
-        // Global sleep handling
-        if (atomic_cas(&sleep_button_event, 1, 0)) {
-            if (state == AWAKE) {
-                // Enter sleep
-                stored_action_freq_hz = action_freq_hz;
-                stored_action_phase = action_phase;
+                    gpio_pin_interrupt_configure_dt(&sleep_button, GPIO_INT_EDGE_TO_ACTIVE);
+                    gpio_pin_interrupt_configure_dt(&freq_up_button, GPIO_INT_EDGE_TO_ACTIVE);
+                    gpio_pin_interrupt_configure_dt(&freq_down_button, GPIO_INT_EDGE_TO_ACTIVE);
 
-                // Save remaining time in the current half-period BEFORE stopping
-                stored_action_remaining_ms = k_timer_remaining_get(&action_timer);
+                    k_timer_stop(&action_timer);
+                    LOG_INF("Reset pressed -> DEFAULTS @ %llu ns", now_ns());
+                    state = DEFAULTS;
+                    break;
+                }
 
-                k_timer_stop(&action_timer);
-                gpio_pin_set_dt(&iv_pump_led, 0);
-                gpio_pin_set_dt(&buzzer_led, 0);
-
-                LOG_INF("Entered SLEEP (stored freq=%d, phase=%d, rem=%d ms) @ %llu ns",
-                    stored_action_freq_hz, stored_action_phase, stored_action_remaining_ms, now_ns());
-
-                state = SLEEP;
-            }
-            else if (state == SLEEP) {
-                // Exit sleep
+                /* Wake on Sleep */
                 action_freq_hz = stored_action_freq_hz;
                 action_phase = stored_action_phase;
 
-                // Restore immediate LED state first
                 if (action_phase == 0) {
                     gpio_pin_set_dt(&iv_pump_led, 1);
                     gpio_pin_set_dt(&buzzer_led, 0);
@@ -327,13 +350,9 @@ int main(void)
                     gpio_pin_set_dt(&buzzer_led, 1);
                 }
 
-                // Then start the timer
                 int32_t hp = action_half_period_ms(action_freq_hz);
-
-                // First interval should be whatever time was left when we went to sleep
                 int32_t first_ms = stored_action_remaining_ms;
 
-                // Safety fallback: if it's <=0 or larger than half-period, use half-period
                 if (first_ms <= 0 || first_ms > hp) {
                     first_ms = hp;
                 }
@@ -345,30 +364,23 @@ int main(void)
                     action_freq_hz, action_phase, first_ms, hp, now_ns());
 
                 state = AWAKE;
+                break;
+            }
+            case ERROR: {
+                (void)k_event_wait(&button_events, BTN_RESET_BIT, true, K_FOREVER);
+
+                gpio_pin_set_dt(&error_led, 0);
+
+                gpio_pin_interrupt_configure_dt(&sleep_button, GPIO_INT_EDGE_TO_ACTIVE);
+                gpio_pin_interrupt_configure_dt(&freq_up_button, GPIO_INT_EDGE_TO_ACTIVE);
+                gpio_pin_interrupt_configure_dt(&freq_down_button, GPIO_INT_EDGE_TO_ACTIVE);
+
+                k_timer_stop(&action_timer);
+                LOG_INF("Reset pressed -> DEFAULTS @ %llu ns", now_ns());
+                state = DEFAULTS;
+                break;
             }
         }
-
-        // Global reset handling
-        if (atomic_cas(&reset_button_event, 1, 0)) {
-
-            // clear error LED
-            gpio_pin_set_dt(&error_led, 0);
-
-            // re-enable interrupts
-            gpio_pin_interrupt_configure_dt(&sleep_button, GPIO_INT_EDGE_TO_ACTIVE);
-            gpio_pin_interrupt_configure_dt(&freq_up_button, GPIO_INT_EDGE_TO_ACTIVE);
-            gpio_pin_interrupt_configure_dt(&freq_down_button, GPIO_INT_EDGE_TO_ACTIVE);
-
-            atomic_set(&sleep_button_event, 0);
-            atomic_set(&freq_up_button_event, 0);
-            atomic_set(&freq_down_button_event, 0);
-            
-            k_timer_stop(&action_timer);
-            LOG_INF("Reset pressed -> DEFAULTS @ %llu ns", now_ns());
-            state = DEFAULTS;
-        }
-
-        k_msleep(10);  // include a very short sleep statement to allow any LOG messages to be printed
     }
 }
 
