@@ -12,18 +12,24 @@
 LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
 
 // define macros 
-#define HEARTBEAT_TOGGLE_INTERVAL_MS 500
 // #define NOMINAL_BATTERY_VOLT_MV 3000 
 #define LED_BLINK_FREQ_HZ 2
 #define FREQ_UP_INC_HZ 1
 #define FREQ_DOWN_INC_HZ 1
 #define ACTION_FREQ_MIN_HZ 1
 #define ACTION_FREQ_MAX_HZ 5
+#define HEARTBEAT_ON_MS   250
+#define HEARTBEAT_OFF_MS  750
+
+#define HEARTBEAT_STACK_SIZE 1024
+#define HEARTBEAT_THREAD_PRIO 5
+
+K_THREAD_STACK_DEFINE(heartbeat_stack, HEARTBEAT_STACK_SIZE);
+static struct k_thread heartbeat_thread_data;
+
+static void heartbeat_thread(void *a, void *b, void *c);
 
 // declare function prototypes
-void heartbeat_timer_handler(struct k_timer *t);
-K_TIMER_DEFINE(heartbeat_timer, heartbeat_timer_handler, NULL);
-
 void action_timer_handler(struct k_timer *t);
 void action_timer_stop(struct k_timer *t);
 K_TIMER_DEFINE(action_timer, action_timer_handler, action_timer_stop);
@@ -81,8 +87,8 @@ static int action_freq_hz = LED_BLINK_FREQ_HZ;          // current
 static int stored_action_freq_hz = LED_BLINK_FREQ_HZ;   // for sleep restore
 static bool stored_action_phase = 0;                    // for sleep restore
 
-static int32_t stored_action_remaining_ms = 0;
 static uint64_t hb_last_ns = 0;
+static int32_t stored_action_remaining_ms = 0;
 static uint64_t action_last_ns = 0;
 
 int main(void)
@@ -203,9 +209,14 @@ int main(void)
                 err = gpio_add_callback_dt(&freq_down_button, &freq_down_button_cb);
                 if (err < 0) { LOG_ERR("Cannot add freq_down button callback."); return err; }
 
-                k_timer_start(&heartbeat_timer,
-                K_MSEC(HEARTBEAT_TOGGLE_INTERVAL_MS),
-                K_MSEC(HEARTBEAT_TOGGLE_INTERVAL_MS));
+                k_thread_create(&heartbeat_thread_data,
+                    heartbeat_stack,
+                    K_THREAD_STACK_SIZEOF(heartbeat_stack),
+                    heartbeat_thread,
+                    NULL, NULL, NULL,
+                    HEARTBEAT_THREAD_PRIO, 0, K_NO_WAIT);
+
+                k_thread_name_set(&heartbeat_thread_data, "heartbeat");
                 action_last_ns = 0;
 
                 state = DEFAULTS;  // transition to the next state
@@ -355,16 +366,6 @@ int main(void)
 }
 
 // define timer functions
-void heartbeat_timer_handler(struct k_timer *t)
-{
-    uint64_t now = now_ns();
-    if (hb_last_ns != 0) {
-        LOG_INF("heart toggle period (ns): %llu", now - hb_last_ns);
-    }
-    hb_last_ns = now;
-    gpio_pin_toggle_dt(&heartbeat_led);
-}
-
 void action_timer_handler(struct k_timer *t)
 {
     uint64_t now = now_ns();
@@ -409,3 +410,28 @@ void freq_down_button_callback(const struct device *dev, struct gpio_callback *c
 {
     atomic_set(&freq_down_button_event, 1); 
 } 
+
+// define thread functions
+static void heartbeat_thread(void *a, void *b, void *c)
+{
+    ARG_UNUSED(a);
+    ARG_UNUSED(b);
+    ARG_UNUSED(c);
+
+    while (1) {
+        uint64_t now = now_ns();
+        if (hb_last_ns != 0) {
+            LOG_INF("heart toggle period (ns): %llu", now - hb_last_ns);
+        }
+        hb_last_ns = now;
+
+        gpio_pin_toggle_dt(&heartbeat_led);
+
+        /* duty cycle: 25% on, 75% off */
+        if (gpio_pin_get_dt(&heartbeat_led) > 0) {
+            k_msleep(HEARTBEAT_ON_MS);
+        } else {
+            k_msleep(HEARTBEAT_OFF_MS);
+        }
+    }
+}
