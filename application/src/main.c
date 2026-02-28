@@ -29,6 +29,17 @@ static struct k_thread heartbeat_thread_data;
 
 static void heartbeat_thread(void *a, void *b, void *c);
 
+/* 4-bit button event array */
+#define BTN_SLEEP_BIT     BIT(0)
+#define BTN_RESET_BIT     BIT(1)
+#define BTN_FREQ_UP_BIT   BIT(2)
+#define BTN_FREQ_DOWN_BIT BIT(3)
+
+#define BTN_ALL_BITS (BTN_SLEEP_BIT | BTN_RESET_BIT | BTN_FREQ_UP_BIT | BTN_FREQ_DOWN_BIT)
+
+/* Kernel event object */
+K_EVENT_DEFINE(button_events);
+
 // declare function prototypes
 void action_timer_handler(struct k_timer *t);
 void action_timer_stop(struct k_timer *t);
@@ -55,11 +66,6 @@ static const struct gpio_dt_spec sleep_button = GPIO_DT_SPEC_GET(DT_ALIAS(sleepb
 static const struct gpio_dt_spec reset_button = GPIO_DT_SPEC_GET(DT_ALIAS(resetbutton), gpios);
 static const struct gpio_dt_spec freq_up_button = GPIO_DT_SPEC_GET(DT_ALIAS(frequpbutton), gpios);
 static const struct gpio_dt_spec freq_down_button = GPIO_DT_SPEC_GET(DT_ALIAS(freqdownbutton), gpios);
-
-static atomic_t sleep_button_event = ATOMIC_INIT(0);
-static atomic_t reset_button_event = ATOMIC_INIT(0);
-static atomic_t freq_up_button_event = ATOMIC_INIT(0);
-static atomic_t freq_down_button_event = ATOMIC_INIT(0);
 
 // define callback functions
 void sleep_button_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins);
@@ -217,6 +223,7 @@ int main(void)
                     HEARTBEAT_THREAD_PRIO, 0, K_NO_WAIT);
 
                 k_thread_name_set(&heartbeat_thread_data, "heartbeat");
+                k_event_clear(&button_events, BTN_ALL_BITS);
                 action_last_ns = 0;
 
                 state = DEFAULTS;  // transition to the next state
@@ -393,23 +400,23 @@ void action_timer_stop(struct k_timer *t)
 // define callback functions
 void sleep_button_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
 {
-    atomic_set(&sleep_button_event, 1);  
+    k_event_post(&button_events, BTN_SLEEP_BIT);
 }
 
 void reset_button_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
 {
-    atomic_set(&reset_button_event, 1); 
+    k_event_post(&button_events, BTN_RESET_BIT);
 }
 
 void freq_up_button_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
 {
-    atomic_set(&freq_up_button_event, 1); 
+    k_event_post(&button_events, BTN_FREQ_UP_BIT);
 }
 
 void freq_down_button_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
 {
-    atomic_set(&freq_down_button_event, 1); 
-} 
+    k_event_post(&button_events, BTN_FREQ_DOWN_BIT);
+}
 
 // define thread functions
 static void heartbeat_thread(void *a, void *b, void *c)
