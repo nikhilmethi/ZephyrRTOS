@@ -26,7 +26,7 @@ LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
 
 extern void heartbeat_thread(void *, void *, void *);
 
-/* lecture-style thread definition */
+/* thread definition */
 K_THREAD_DEFINE(heartbeat_thread_id,
                 HEARTBEAT_STACK_SIZE,
                 heartbeat_thread,
@@ -34,12 +34,12 @@ K_THREAD_DEFINE(heartbeat_thread_id,
                 HEARTBEAT_THREAD_PRIO, 0, 0);
 
 /* 4-bit button event array */
-#define BTN_SLEEP_BIT     BIT(0)
-#define BTN_RESET_BIT     BIT(1)
-#define BTN_FREQ_UP_BIT   BIT(2)
-#define BTN_FREQ_DOWN_BIT BIT(3)
+#define BTN_SLEEP_EVENT    BIT(0)
+#define BTN_RESET_EVENT    BIT(1)
+#define BTN_FREQ_UP_EVENT   BIT(2)
+#define BTN_FREQ_DOWN_EVENT BIT(3)
 
-#define BTN_ALL_BITS (BTN_SLEEP_BIT | BTN_RESET_BIT | BTN_FREQ_UP_BIT | BTN_FREQ_DOWN_BIT)
+#define BTN_EVENT_MASK (BTN_SLEEP_EVENT | BTN_RESET_EVENT | BTN_FREQ_UP_EVENT | BTN_FREQ_DOWN_EVENT)
 
 /* Kernel event object */
 K_EVENT_DEFINE(button_events);
@@ -121,10 +121,6 @@ int main(void)
                 LOG_ERR("ERROR: action_freq out of range (%d Hz) @ %llu ns",
                         action_freq_hz, now_ns());
             }
-
-            /* EXIT actions (optional) */
-            /* none needed to preserve behavior */
-
             prev_state = state;
         }
         switch (state) {
@@ -221,7 +217,7 @@ int main(void)
 
                 k_thread_name_set(heartbeat_thread_id, "heartbeat");
 
-                k_event_clear(&button_events, BTN_ALL_BITS);
+                k_event_clear(&button_events, BTN_EVENT_MASK);
                 action_last_ns = 0;
 
                 state = DEFAULTS;  // transition to the next state
@@ -255,10 +251,12 @@ int main(void)
                 break;
            
             case AWAKE: {
-                uint32_t ev = k_event_wait(&button_events, BTN_ALL_BITS, true, K_FOREVER);
+                uint32_t events = k_event_wait(&button_events, BTN_EVENT_MASK, true, K_FOREVER);
 
+                /* bit mask output as an int */
+                LOG_INF("Button Event Posted: %u", events);
                 /* Reset wins */
-                if (ev & BTN_RESET_BIT) {
+                if (events & BTN_RESET_EVENT) {
                     gpio_pin_set_dt(&error_led, 0);
 
                     gpio_pin_interrupt_configure_dt(&sleep_button, GPIO_INT_EDGE_TO_ACTIVE);
@@ -272,7 +270,7 @@ int main(void)
                 }
 
                 /* Sleep toggle */
-                if (ev & BTN_SLEEP_BIT) {
+                if (events & BTN_SLEEP_EVENT) {
                     stored_action_freq_hz = action_freq_hz;
                     stored_action_phase = action_phase;
 
@@ -292,13 +290,13 @@ int main(void)
                 /* Frequency changes */
                 bool freq_changed = false;
 
-                if (ev & BTN_FREQ_UP_BIT) {
+                if (events & BTN_FREQ_UP_EVENT) {
                     action_freq_hz += FREQ_UP_INC_HZ;
                     freq_changed = true;
                     LOG_INF("FREQ_UP -> %d Hz @ %llu ns", action_freq_hz, now_ns());
                 }
 
-                if (ev & BTN_FREQ_DOWN_BIT) {
+                if (events & BTN_FREQ_DOWN_EVENT) {
                     action_freq_hz -= FREQ_DOWN_INC_HZ;
                     freq_changed = true;
                     LOG_INF("FREQ_DOWN -> %d Hz @ %llu ns", action_freq_hz, now_ns());
@@ -318,12 +316,11 @@ int main(void)
                 break;
             }
             case SLEEP: {
-                uint32_t ev = k_event_wait(&button_events,
-                                        BTN_SLEEP_BIT | BTN_RESET_BIT,
-                                        true,
-                                        K_FOREVER);
+                uint32_t mask = (BTN_SLEEP_EVENT | BTN_RESET_EVENT);
+                uint32_t events = k_event_wait(&button_events, mask, true, K_FOREVER);
+                LOG_INF("Button Event Posted: %u", events);
 
-                if (ev & BTN_RESET_BIT) {
+                if (events & BTN_RESET_EVENT) {
                     gpio_pin_set_dt(&error_led, 0);
 
                     gpio_pin_interrupt_configure_dt(&sleep_button, GPIO_INT_EDGE_TO_ACTIVE);
@@ -365,7 +362,8 @@ int main(void)
                 break;
             }
             case ERROR: {
-                (void)k_event_wait(&button_events, BTN_RESET_BIT, true, K_FOREVER);
+                uint32_t events = k_event_wait(&button_events, BTN_RESET_EVENT, true, K_FOREVER);
+                LOG_INF("Button Event Posted: %u", events);
 
                 gpio_pin_set_dt(&error_led, 0);
 
@@ -410,22 +408,22 @@ void action_timer_stop(struct k_timer *t)
 // define callback functions
 void sleep_button_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
 {
-    k_event_post(&button_events, BTN_SLEEP_BIT);
+    k_event_post(&button_events, BTN_SLEEP_EVENT);
 }
 
 void reset_button_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
 {
-    k_event_post(&button_events, BTN_RESET_BIT);
+    k_event_post(&button_events, BTN_RESET_EVENT);
 }
 
 void freq_up_button_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
 {
-    k_event_post(&button_events, BTN_FREQ_UP_BIT);
+    k_event_post(&button_events, BTN_FREQ_UP_EVENT);
 }
 
 void freq_down_button_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
 {
-    k_event_post(&button_events, BTN_FREQ_DOWN_BIT);
+    k_event_post(&button_events, BTN_FREQ_DOWN_EVENT);
 }
 
 // define thread functions
@@ -440,7 +438,7 @@ void heartbeat_thread(void *, void *, void *)
         k_msleep(HEARTBEAT_OFF_MS);
         gpio_pin_toggle_dt(&heartbeat_led);
 
-        /* log ON duration (toggle-to-toggle) */
+        /* log toggle-to-toggle interval (expected 750ms then 250ms) */
         uint64_t now = now_ns();
         if (hb_last_ns != 0) {
             LOG_INF("heart toggle period (ns): %llu", now - hb_last_ns);
@@ -451,7 +449,7 @@ void heartbeat_thread(void *, void *, void *)
         k_msleep(HEARTBEAT_ON_MS);
         gpio_pin_toggle_dt(&heartbeat_led);
 
-        /* log OFF duration (toggle-to-toggle) */
+        /* log toggle-to-toggle interval (expected 750ms then 250ms) */
         now = now_ns();
         if (hb_last_ns != 0) {
             LOG_INF("heart toggle period (ns): %llu", now - hb_last_ns);
