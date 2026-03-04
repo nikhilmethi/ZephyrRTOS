@@ -1,0 +1,119 @@
+@startuml
+title Button Press -> ISR -> Kernel Event Bit Array -> State Machine Thread
+
+participant "User" as User
+participant "GPIO HW" as GPIO
+participant "Button ISR\nCallbacks\n(sleep/reset/freq_up/freq_down)" as ISR
+participant "Kernel Event\nBit Array\nbutton_events" as KEvents
+participant "State Machine Thread\n(main)" as Main
+participant "Action Timer\n(action_timer)" as ATimer
+participant "GPIO LEDs\n(iv_pump, buzzer, error)" as LEDs
+
+== AWAKE state: main waits for any button event ==
+Main -> KEvents : k_event_wait(BTN_EVENT_MASK,\nreset=true,\nK_FOREVER)\n[blocking]
+activate Main
+
+note over User : A button is pressed
+User -> GPIO : physical button press
+GPIO -> ISR : interrupt fires
+
+alt Sleep button pressed
+  ISR -> KEvents : k_event_post(BTN_SLEEP_EVENT)
+else Reset button pressed
+  ISR -> KEvents : k_event_post(BTN_RESET_EVENT)
+else Freq Up button pressed
+  ISR -> KEvents : k_event_post(BTN_FREQ_UP_EVENT)
+else Freq Down button pressed
+  ISR -> KEvents : k_event_post(BTN_FREQ_DOWN_EVENT)
+end
+
+note over KEvents : k_event_wait(..., reset=true)\nclears waited-on bits before returning
+KEvents --> Main : events bitmask returned
+deactivate Main
+
+Main -> Main : LOG_INF("Button Event Posted: %u", events)
+
+alt Reset wins (events & BTN_RESET_EVENT)
+  Main -> LEDs : error_led = 0
+  Main -> GPIO : enable sleep/freq interrupts\n(GPIO_INT_EDGE_TO_ACTIVE)
+  Main -> ATimer : k_timer_stop()
+  Main -> Main : state = DEFAULTS
+
+else Sleep toggle (events & BTN_SLEEP_EVENT)
+  Main -> ATimer : stored_action_remaining_ms =\n k_timer_remaining_get()
+  Main -> ATimer : k_timer_stop()
+  Main -> LEDs : iv_pump=0, buzzer=0
+  Main -> Main : state = SLEEP
+
+else Frequency event (UP/DOWN)
+  alt (events & BTN_FREQ_UP_EVENT)
+    Main -> Main : action_freq_hz += 1\nLOG_INF("FREQ_UP -> ...")
+  end
+  alt (events & BTN_FREQ_DOWN_EVENT)
+    Main -> Main : action_freq_hz -= 1\nLOG_INF("FREQ_DOWN -> ...")
+  end
+
+  alt out of range\n(action_freq_hz < 1 || > 5)
+    Main -> ATimer : k_timer_stop()
+    Main -> LEDs : iv_pump=0, buzzer=0, error_led=1
+    Main -> GPIO : disable sleep/freq interrupts\n(GPIO_INT_DISABLE)
+    Main -> Main : state = ERROR
+  else in range
+    Main -> ATimer : hp = action_half_period_ms(action_freq_hz)
+    Main -> ATimer : k_timer_start(hp, hp)
+    Main -> Main : state stays AWAKE
+  end
+end
+
+== SLEEP state: main waits for sleep or reset ==
+Main -> KEvents : k_event_wait(BTN_SLEEP_EVENT|BTN_RESET_EVENT,\nreset=true,\nK_FOREVER)\n[blocking]
+activate Main
+
+note over User : Sleep or Reset pressed
+User -> GPIO : physical button press
+GPIO -> ISR : interrupt fires
+
+alt Sleep pressed (wake)
+  ISR -> KEvents : k_event_post(BTN_SLEEP_EVENT)
+else Reset pressed
+  ISR -> KEvents : k_event_post(BTN_RESET_EVENT)
+end
+
+note over KEvents : k_event_wait(..., reset=true)\nclears waited-on bits before returning
+KEvents --> Main : events bitmask returned
+deactivate Main
+
+Main -> Main : LOG_INF("Button Event Posted: %u", events)
+
+alt Reset (events & BTN_RESET_EVENT)
+  Main -> LEDs : error_led=0
+  Main -> GPIO : enable sleep/freq interrupts\n(GPIO_INT_EDGE_TO_ACTIVE)
+  Main -> ATimer : k_timer_stop()
+  Main -> Main : state = DEFAULTS
+
+else Wake on sleep (events & BTN_SLEEP_EVENT)
+  Main -> LEDs : restore iv_pump/buzzer\nbased on stored_action_phase
+  Main -> ATimer : hp = action_half_period_ms(stored_action_freq_hz)
+  Main -> ATimer : k_timer_start(first_ms, hp)
+  Main -> Main : state = AWAKE
+end
+
+== ERROR state: main waits for reset only ==
+Main -> KEvents : k_event_wait(BTN_RESET_EVENT,\nreset=true,\nK_FOREVER)\n[blocking]
+activate Main
+
+note over User : Reset pressed
+User -> GPIO : physical button press
+GPIO -> ISR : interrupt fires
+ISR -> KEvents : k_event_post(BTN_RESET_EVENT)
+
+note over KEvents : k_event_wait(..., reset=true)\nclears waited-on bits before returning
+KEvents --> Main : events bitmask returned
+deactivate Main
+
+Main -> LEDs : error_led=0
+Main -> GPIO : enable sleep/freq interrupts\n(GPIO_INT_EDGE_TO_ACTIVE)
+Main -> ATimer : k_timer_stop()
+Main -> Main : state = DEFAULTS
+
+@enduml
