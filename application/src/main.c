@@ -24,10 +24,14 @@ LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
 #define HEARTBEAT_STACK_SIZE 1024
 #define HEARTBEAT_THREAD_PRIO 5
 
-K_THREAD_STACK_DEFINE(heartbeat_stack, HEARTBEAT_STACK_SIZE);
-static struct k_thread heartbeat_thread_data;
+extern void heartbeat_thread(void *, void *, void *);
 
-static void heartbeat_thread(void *a, void *b, void *c);
+/* lecture-style thread definition */
+K_THREAD_DEFINE(heartbeat_thread_id,
+                HEARTBEAT_STACK_SIZE,
+                heartbeat_thread,
+                NULL, NULL, NULL,
+                HEARTBEAT_THREAD_PRIO, 0, 0);
 
 /* 4-bit button event array */
 #define BTN_SLEEP_BIT     BIT(0)
@@ -156,7 +160,7 @@ int main(void)
                     return err;
                 }
 
-                err = gpio_pin_configure_dt(&heartbeat_led, GPIO_OUTPUT_ACTIVE);
+                err = gpio_pin_configure_dt(&heartbeat_led, GPIO_OUTPUT_INACTIVE);
                 if (err < 0) {
                     LOG_ERR("Cannot configure heartbeat LED.");
                     return err;
@@ -215,14 +219,8 @@ int main(void)
                 err = gpio_add_callback_dt(&freq_down_button, &freq_down_button_cb);
                 if (err < 0) { LOG_ERR("Cannot add freq_down button callback."); return err; }
 
-                k_thread_create(&heartbeat_thread_data,
-                    heartbeat_stack,
-                    K_THREAD_STACK_SIZEOF(heartbeat_stack),
-                    heartbeat_thread,
-                    NULL, NULL, NULL,
-                    HEARTBEAT_THREAD_PRIO, 0, K_NO_WAIT);
+                k_thread_name_set(heartbeat_thread_id, "heartbeat");
 
-                k_thread_name_set(&heartbeat_thread_data, "heartbeat");
                 k_event_clear(&button_events, BTN_ALL_BITS);
                 action_last_ns = 0;
 
@@ -431,26 +429,33 @@ void freq_down_button_callback(const struct device *dev, struct gpio_callback *c
 }
 
 // define thread functions
-static void heartbeat_thread(void *a, void *b, void *c)
+void heartbeat_thread(void *, void *, void *)
 {
-    ARG_UNUSED(a);
-    ARG_UNUSED(b);
-    ARG_UNUSED(c);
+
+    /* ensure a known initial LED state */
+    gpio_pin_set_dt(&heartbeat_led, 0);
 
     while (1) {
+        /* OFF -> ON (start pulse) */
+        k_msleep(HEARTBEAT_OFF_MS);
+        gpio_pin_toggle_dt(&heartbeat_led);
+
+        /* log ON duration (toggle-to-toggle) */
         uint64_t now = now_ns();
         if (hb_last_ns != 0) {
             LOG_INF("heart toggle period (ns): %llu", now - hb_last_ns);
         }
         hb_last_ns = now;
 
+        /* ON -> OFF (end pulse) */
+        k_msleep(HEARTBEAT_ON_MS);
         gpio_pin_toggle_dt(&heartbeat_led);
 
-        /* duty cycle: 25% on, 75% off */
-        if (gpio_pin_get_dt(&heartbeat_led) > 0) {
-            k_msleep(HEARTBEAT_ON_MS);
-        } else {
-            k_msleep(HEARTBEAT_OFF_MS);
+        /* log OFF duration (toggle-to-toggle) */
+        now = now_ns();
+        if (hb_last_ns != 0) {
+            LOG_INF("heart toggle period (ns): %llu", now - hb_last_ns);
         }
+        hb_last_ns = now;
     }
 }
