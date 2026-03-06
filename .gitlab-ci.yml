@@ -4,7 +4,7 @@ stages:
 
 zephyr_build:
   stage: build
-  image: zephyrprojectrtos/ci
+  image: zephyrprojectrtos/ci:v0.28.8
   variables:
     NCS_VERSION: v3.2.1
   before_script:
