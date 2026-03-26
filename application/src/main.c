@@ -4,10 +4,10 @@
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/atomic.h>
+#include <zephyr/smf.h> // CONFIG_SMF=y
 
 // #include <zephyr/drivers/adc.h> // CONFIG_ADC=y
 // #include <zephyr/drivers/pwm.h> // CONFIG_PWM=y
-// #include <zephyr/smf.h> // CONFIG_SMF=y
 // #include "ble-lib.h" // BME554 BLE library (remember to add to CMakeLists.txt)
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
@@ -33,7 +33,7 @@ K_THREAD_DEFINE(heartbeat_thread_id,
                 HEARTBEAT_STACK_SIZE,
                 heartbeat_thread,
                 NULL, NULL, NULL,
-                HEARTBEAT_THREAD_PRIO, 0, 0);
+                HEARTBEAT_THREAD_PRIO, 0, K_FOREVER);
 
 /* button events (main-facing) */
 #define BTN_SLEEP_EVENT         BIT(0)
@@ -71,7 +71,7 @@ K_THREAD_DEFINE(doublepress_thread_id,
                 DBLP_STACK_SIZE,
                 doublepress_thread,
                 NULL, NULL, NULL,
-                DBLP_THREAD_PRIO, 0, 0);
+                DBLP_THREAD_PRIO, 0, K_FOREVER);
 
 /* timer prototypes */
 void action_timer_handler(struct k_timer *t);
@@ -130,23 +130,56 @@ static struct gpio_callback reset_button_cb;
 static struct gpio_callback freq_up_button_cb;
 static struct gpio_callback freq_down_button_cb;
 
-/* state machine */
-enum states { INIT, DEFAULTS, AWAKE, SLEEP, ERROR };
-static int state = INIT;
-static enum states prev_state = INIT;
+/* SMF helper prototypes */
+static int init_app_object(struct app_object *s);
+static void set_action_outputs_from_phase(bool phase);
+static void clear_action_outputs(void);
+static void enable_awake_buttons(void);
+static void disable_awake_buttons(void);
+static void start_action_timer_for_freq(struct app_object *s);
+static void restore_action_timer_after_sleep(struct app_object *s);
 
-/* action_phase == 0: ivpump ON, buzzer OFF
-   action_phase == 1: ivpump OFF, buzzer ON */
-static bool action_phase = 0;
+/* SMF state handlers */
+static void init_run(void *o);
+static void defaults_entry(void *o);
+static void defaults_run(void *o);
+static void awake_entry(void *o);
+static void awake_run(void *o);
+static void sleep_entry(void *o);
+static void sleep_run(void *o);
+static void error_entry(void *o);
+static void error_run(void *o);
+static void error_exit(void *o);
 
-/* frequency control */
-static int action_freq_hz = LED_BLINK_FREQ_HZ;          // current
-static int stored_action_freq_hz = LED_BLINK_FREQ_HZ;   // for sleep restore
-static bool stored_action_phase = 0;                    // for sleep restore
+/* SMF state machine */
+enum app_state {
+    STATE_INIT,
+    STATE_DEFAULTS,
+    STATE_AWAKE,
+    STATE_SLEEP,
+    STATE_ERROR,
+};
 
-static uint64_t hb_last_ns = 0;
-static int32_t stored_action_remaining_ms = 0;
-static uint64_t action_last_ns = 0;
+struct app_object {
+    struct smf_ctx ctx;   /* must be first */
+
+    int action_freq_hz;
+    int stored_action_freq_hz;
+
+    bool action_phase;
+    bool stored_action_phase;
+
+    int32_t stored_action_remaining_ms;
+
+    uint64_t hb_last_ns;
+    uint64_t action_last_ns;
+
+    bool wake_from_sleep;
+    bool threads_started;
+};
+
+static struct app_object s_obj;
+static const struct smf_state app_states[];
 
 int main(void)
 {
