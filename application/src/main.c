@@ -317,6 +317,16 @@ static void init_run(void *o)
     k_event_clear(&button_events, BTN_EVENT_MASK);
     k_event_clear(&raw_freq_events, RAW_FREQ_MASK);
 
+    k_timer_user_data_set(&action_timer, s);
+
+    if (!s->threads_started) {
+        k_thread_name_set(heartbeat_thread_id, "heartbeat");
+        k_thread_name_set(doublepress_thread_id, "doublepress");
+        k_thread_start(heartbeat_thread_id);
+        k_thread_start(doublepress_thread_id);
+        s->threads_started = true;
+    }
+
     smf_set_state(SMF_CTX(s), &app_states[STATE_DEFAULTS]);
 }
 
@@ -498,28 +508,24 @@ int main(void)
 
 void action_timer_handler(struct k_timer *t)
 {
+    struct app_object *s = (struct app_object *)k_timer_user_data_get(t);
     uint64_t now = now_ns();
 
-    if (action_last_ns != 0) {
-        LOG_INF("action toggle period (ns): %llu", now - action_last_ns);
+    if ((s != NULL) && (s->action_last_ns != 0U)) {
+        LOG_INF("action toggle period (ns): %llu", now - s->action_last_ns);
     }
-    action_last_ns = now;
 
-    action_phase = !action_phase;
-
-    if (action_phase == 0) {
-        gpio_pin_set_dt(&iv_pump_led, 1);
-        gpio_pin_set_dt(&buzzer_led, 0);
-    } else {
-        gpio_pin_set_dt(&iv_pump_led, 0);
-        gpio_pin_set_dt(&buzzer_led, 1);
+    if (s != NULL) {
+        s->action_last_ns = now;
+        s->action_phase = !s->action_phase;
+        set_action_outputs_from_phase(s->action_phase);
     }
 }
 
 void action_timer_stop(struct k_timer *t)
 {
-    gpio_pin_set_dt(&iv_pump_led, 0);
-    gpio_pin_set_dt(&buzzer_led, 0);
+    ARG_UNUSED(t);
+    clear_action_outputs();
 }
 
 /* GPIO callbacks */
@@ -554,20 +560,18 @@ void heartbeat_thread(void *, void *, void *)
         k_msleep(HEARTBEAT_OFF_MS);
         gpio_pin_toggle_dt(&heartbeat_led);
 
-        uint64_t now = now_ns();
-        if (hb_last_ns != 0) {
-            LOG_INF("heart toggle period (ns): %llu", now - hb_last_ns);
+        if (s_obj.hb_last_ns != 0U) {
+            LOG_INF("heart toggle period (ns): %llu", now_ns() - s_obj.hb_last_ns);
         }
-        hb_last_ns = now;
+        s_obj.hb_last_ns = now_ns();
 
         k_msleep(HEARTBEAT_ON_MS);
         gpio_pin_toggle_dt(&heartbeat_led);
 
-        now = now_ns();
-        if (hb_last_ns != 0) {
-            LOG_INF("heart toggle period (ns): %llu", now - hb_last_ns);
+        if (s_obj.hb_last_ns != 0U) {
+            LOG_INF("heart toggle period (ns): %llu", now_ns() - s_obj.hb_last_ns);
         }
-        hb_last_ns = now;
+        s_obj.hb_last_ns = now_ns();
     }
 }
 
