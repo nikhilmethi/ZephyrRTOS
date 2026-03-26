@@ -348,7 +348,17 @@ static void defaults_run(void *o)
 
 static void awake_entry(void *o)
 {
-    ARG_UNUSED(o);
+    struct app_object *s = (struct app_object *)o;
+
+    gpio_pin_set_dt(&error_led, 0);
+    enable_awake_buttons();
+
+    if (s->wake_from_sleep) {
+        s->wake_from_sleep = false;
+        s->action_freq_hz = s->stored_action_freq_hz;
+        s->action_phase = s->stored_action_phase;
+        restore_action_timer_after_sleep(s);
+    }
 }
 
 static void awake_run(void *o)
@@ -365,17 +375,6 @@ static void awake_run(void *o)
     }
 
     if (events & BTN_SLEEP_EVENT) {
-        s->stored_action_freq_hz = s->action_freq_hz;
-        s->stored_action_phase = s->action_phase;
-        s->stored_action_remaining_ms = k_timer_remaining_get(&action_timer);
-
-        k_timer_stop(&action_timer);
-        clear_action_outputs();
-
-        LOG_INF("Entered SLEEP (stored freq=%d, phase=%d, rem=%d ms) @ %llu ns",
-                s->stored_action_freq_hz, s->stored_action_phase,
-                s->stored_action_remaining_ms, now_ns());
-
         smf_set_state(SMF_CTX(s), &app_states[STATE_SLEEP]);
         return;
     }
@@ -402,7 +401,19 @@ static void awake_run(void *o)
 
 static void sleep_entry(void *o)
 {
-    ARG_UNUSED(o);
+    struct app_object *s = (struct app_object *)o;
+
+    s->stored_action_freq_hz = s->action_freq_hz;
+    s->stored_action_phase = s->action_phase;
+    s->stored_action_remaining_ms = k_timer_remaining_get(&action_timer);
+    s->wake_from_sleep = false;
+
+    k_timer_stop(&action_timer);
+    clear_action_outputs();
+
+    LOG_INF("Entered SLEEP (stored freq=%d, phase=%d, rem=%d ms) @ %llu ns",
+            s->stored_action_freq_hz, s->stored_action_phase,
+            s->stored_action_remaining_ms, now_ns());
 }
 
 static void sleep_run(void *o)
@@ -416,14 +427,12 @@ static void sleep_run(void *o)
     LOG_INF("Button Event Posted: %u", events);
 
     if (events & BTN_RESET_EVENT) {
+        s->wake_from_sleep = false;
         smf_set_state(SMF_CTX(s), &app_states[STATE_DEFAULTS]);
         return;
     }
 
-    s->action_freq_hz = s->stored_action_freq_hz;
-    s->action_phase = s->stored_action_phase;
-    restore_action_timer_after_sleep(s);
-
+    s->wake_from_sleep = true;
     smf_set_state(SMF_CTX(s), &app_states[STATE_AWAKE]);
 }
 
