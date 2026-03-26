@@ -33,7 +33,7 @@ K_THREAD_DEFINE(heartbeat_thread_id,
                 HEARTBEAT_STACK_SIZE,
                 heartbeat_thread,
                 NULL, NULL, NULL,
-                HEARTBEAT_THREAD_PRIO, 0, K_FOREVER);
+                HEARTBEAT_THREAD_PRIO, 0, 0);
 
 /* button events (main-facing) */
 #define BTN_SLEEP_EVENT         BIT(0)
@@ -71,7 +71,7 @@ K_THREAD_DEFINE(doublepress_thread_id,
                 DBLP_STACK_SIZE,
                 doublepress_thread,
                 NULL, NULL, NULL,
-                DBLP_THREAD_PRIO, 0, K_FOREVER);
+                DBLP_THREAD_PRIO, 0, 0);
 
 /* timer prototypes */
 void action_timer_handler(struct k_timer *t);
@@ -130,27 +130,6 @@ static struct gpio_callback reset_button_cb;
 static struct gpio_callback freq_up_button_cb;
 static struct gpio_callback freq_down_button_cb;
 
-/* SMF helper prototypes */
-static int init_app_object(struct app_object *s);
-static void set_action_outputs_from_phase(bool phase);
-static void clear_action_outputs(void);
-static void enable_awake_buttons(void);
-static void disable_awake_buttons(void);
-static void start_action_timer_for_freq(struct app_object *s);
-static void restore_action_timer_after_sleep(struct app_object *s);
-
-/* SMF state handlers */
-static void init_run(void *o);
-static void defaults_entry(void *o);
-static void defaults_run(void *o);
-static void awake_entry(void *o);
-static void awake_run(void *o);
-static void sleep_entry(void *o);
-static void sleep_run(void *o);
-static void error_entry(void *o);
-static void error_run(void *o);
-static void error_exit(void *o);
-
 /* SMF state machine */
 enum app_state {
     STATE_INIT,
@@ -180,6 +159,27 @@ struct app_object {
 
 static struct app_object s_obj;
 static const struct smf_state app_states[];
+
+/* SMF helper prototypes */
+static int init_app_object(struct app_object *s);
+static void set_action_outputs_from_phase(bool phase);
+static void clear_action_outputs(void);
+static void enable_awake_buttons(void);
+static void disable_awake_buttons(void);
+static void start_action_timer_for_freq(struct app_object *s);
+static void restore_action_timer_after_sleep(struct app_object *s);
+
+/* SMF state handlers */
+static enum smf_state_result init_run(void *o);
+static void defaults_entry(void *o);
+static enum smf_state_result defaults_run(void *o);
+static void awake_entry(void *o);
+static enum smf_state_result awake_run(void *o);
+static void sleep_entry(void *o);
+static enum smf_state_result sleep_run(void *o);
+static void error_entry(void *o);
+static enum smf_state_result error_run(void *o);
+static void error_exit(void *o);
 
 static int init_app_object(struct app_object *s)
 {
@@ -251,68 +251,67 @@ static void restore_action_timer_after_sleep(struct app_object *s)
             s->action_freq_hz, s->action_phase, first_ms, hp, now_ns());
 }
 
-static void init_run(void *o)
-{
+static enum smf_state_result init_run(void *o){
     struct app_object *s = (struct app_object *)o;
     int err;
 
     if (!device_is_ready(sleep_button.port)) {
         LOG_ERR("gpio0 interface not ready.");
         smf_set_terminate(SMF_CTX(s), -1);
-        return;
+        return SMF_EVENT_HANDLED;;
     }
 
     err = gpio_pin_configure_dt(&sleep_button, GPIO_INPUT);
-    if (err < 0) { LOG_ERR("Cannot configure sleep button."); smf_set_terminate(SMF_CTX(s), err); return; }
+    if (err < 0) { LOG_ERR("Cannot configure sleep button."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
 
     err = gpio_pin_configure_dt(&freq_up_button, GPIO_INPUT);
-    if (err < 0) { LOG_ERR("Cannot configure freq_up button."); smf_set_terminate(SMF_CTX(s), err); return; }
+    if (err < 0) { LOG_ERR("Cannot configure freq_up button."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
 
     err = gpio_pin_configure_dt(&freq_down_button, GPIO_INPUT);
-    if (err < 0) { LOG_ERR("Cannot configure freq_down button."); smf_set_terminate(SMF_CTX(s), err); return; }
+    if (err < 0) { LOG_ERR("Cannot configure freq_down button."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
 
     err = gpio_pin_configure_dt(&reset_button, GPIO_INPUT);
-    if (err < 0) { LOG_ERR("Cannot configure reset button."); smf_set_terminate(SMF_CTX(s), err); return; }
+    if (err < 0) { LOG_ERR("Cannot configure reset button."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
 
     err = gpio_pin_configure_dt(&heartbeat_led, GPIO_OUTPUT_INACTIVE);
-    if (err < 0) { LOG_ERR("Cannot configure heartbeat LED."); smf_set_terminate(SMF_CTX(s), err); return; }
+    if (err < 0) { LOG_ERR("Cannot configure heartbeat LED."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
 
     err = gpio_pin_configure_dt(&iv_pump_led, GPIO_OUTPUT_INACTIVE);
-    if (err < 0) { LOG_ERR("Cannot configure iv_pump LED."); smf_set_terminate(SMF_CTX(s), err); return; }
+    if (err < 0) { LOG_ERR("Cannot configure iv_pump LED."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
 
     err = gpio_pin_configure_dt(&buzzer_led, GPIO_OUTPUT_INACTIVE);
-    if (err < 0) { LOG_ERR("Cannot configure buzzer LED."); smf_set_terminate(SMF_CTX(s), err); return; }
+    if (err < 0) { LOG_ERR("Cannot configure buzzer LED."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
 
     err = gpio_pin_configure_dt(&error_led, GPIO_OUTPUT_INACTIVE);
-    if (err < 0) { LOG_ERR("Cannot configure error LED."); smf_set_terminate(SMF_CTX(s), err); return; }
+    if (err < 0) { LOG_ERR("Cannot configure error LED."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
 
     err = gpio_pin_interrupt_configure_dt(&sleep_button, GPIO_INT_EDGE_TO_ACTIVE);
-    if (err < 0) { LOG_ERR("Cannot attach callback to sw0."); smf_set_terminate(SMF_CTX(s), err); return; }
+    if (err < 0) { LOG_ERR("Cannot attach callback to sw0."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
 
     err = gpio_pin_interrupt_configure_dt(&freq_up_button, GPIO_INT_EDGE_TO_ACTIVE);
-    if (err < 0) { LOG_ERR("Cannot attach callback to sw1."); smf_set_terminate(SMF_CTX(s), err); return; }
+    if (err < 0) { LOG_ERR("Cannot attach callback to sw1."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
 
     err = gpio_pin_interrupt_configure_dt(&freq_down_button, GPIO_INT_EDGE_TO_ACTIVE);
-    if (err < 0) { LOG_ERR("Cannot attach callback to sw2."); smf_set_terminate(SMF_CTX(s), err); return; }
+    if (err < 0) { LOG_ERR("Cannot attach callback to sw2."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
 
     err = gpio_pin_interrupt_configure_dt(&reset_button, GPIO_INT_EDGE_TO_ACTIVE);
-    if (err < 0) { LOG_ERR("Cannot attach callback to sw3."); smf_set_terminate(SMF_CTX(s), err); return; }
+    if (err < 0) { LOG_ERR("Cannot attach callback to sw3."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
 
     gpio_init_callback(&sleep_button_cb, sleep_button_callback, BIT(sleep_button.pin));
     err = gpio_add_callback_dt(&sleep_button, &sleep_button_cb);
-    if (err < 0) { LOG_ERR("Cannot add sleep button callback."); smf_set_terminate(SMF_CTX(s), err); return; }
+    if (err < 0) { LOG_ERR("Cannot add sleep button callback."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
 
     gpio_init_callback(&reset_button_cb, reset_button_callback, BIT(reset_button.pin));
     err = gpio_add_callback_dt(&reset_button, &reset_button_cb);
-    if (err < 0) { LOG_ERR("Cannot add reset button callback."); smf_set_terminate(SMF_CTX(s), err); return; }
+    if (err < 0) { LOG_ERR("Cannot add reset button callback."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
 
     gpio_init_callback(&freq_up_button_cb, freq_up_button_callback, BIT(freq_up_button.pin));
     err = gpio_add_callback_dt(&freq_up_button, &freq_up_button_cb);
-    if (err < 0) { LOG_ERR("Cannot add freq_up button callback."); smf_set_terminate(SMF_CTX(s), err); return; }
+    if (err < 0) { LOG_ERR("Cannot add freq_up button callback."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
 
     gpio_init_callback(&freq_down_button_cb, freq_down_button_callback, BIT(freq_down_button.pin));
     err = gpio_add_callback_dt(&freq_down_button, &freq_down_button_cb);
-    if (err < 0) { LOG_ERR("Cannot add freq_down button callback."); smf_set_terminate(SMF_CTX(s), err); return; }
+    if (err < 0) { LOG_ERR("Cannot add freq_down button callback."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
 
     k_event_clear(&button_events, BTN_EVENT_MASK);
     k_event_clear(&raw_freq_events, RAW_FREQ_MASK);
@@ -328,6 +327,7 @@ static void init_run(void *o)
     }
 
     smf_set_state(SMF_CTX(s), &app_states[STATE_DEFAULTS]);
+    return SMF_EVENT_HANDLED;
 }
 
 static void defaults_entry(void *o)
@@ -350,10 +350,11 @@ static void defaults_entry(void *o)
             s->action_freq_hz, s->action_phase, now_ns());
 }
 
-static void defaults_run(void *o)
+static enum smf_state_result defaults_run(void *o)
 {
     struct app_object *s = (struct app_object *)o;
     smf_set_state(SMF_CTX(s), &app_states[STATE_AWAKE]);
+    return SMF_EVENT_HANDLED;
 }
 
 static void awake_entry(void *o)
@@ -371,7 +372,7 @@ static void awake_entry(void *o)
     }
 }
 
-static void awake_run(void *o)
+static enum smf_state_result awake_run(void *o)
 {
     struct app_object *s = (struct app_object *)o;
     uint32_t events = k_event_wait(&button_events, BTN_EVENT_MASK, true, K_FOREVER);
@@ -381,12 +382,12 @@ static void awake_run(void *o)
 
     if (events & BTN_RESET_EVENT) {
         smf_set_state(SMF_CTX(s), &app_states[STATE_DEFAULTS]);
-        return;
+        return SMF_EVENT_HANDLED;;
     }
 
     if (events & BTN_SLEEP_EVENT) {
         smf_set_state(SMF_CTX(s), &app_states[STATE_SLEEP]);
-        return;
+        return SMF_EVENT_HANDLED;;
     }
 
     if (events & BTN_FREQ_UP_DBL_EVENT)   { delta += (2 * FREQ_UP_INC_HZ); }
@@ -401,12 +402,13 @@ static void awake_run(void *o)
 
     if (s->action_freq_hz < ACTION_FREQ_MIN_HZ || s->action_freq_hz > ACTION_FREQ_MAX_HZ) {
         smf_set_state(SMF_CTX(s), &app_states[STATE_ERROR]);
-        return;
+        return SMF_EVENT_HANDLED;;
     }
 
     if (delta != 0) {
         start_action_timer_for_freq(s);
     }
+    return SMF_EVENT_HANDLED;
 }
 
 static void sleep_entry(void *o)
@@ -426,7 +428,7 @@ static void sleep_entry(void *o)
             s->stored_action_remaining_ms, now_ns());
 }
 
-static void sleep_run(void *o)
+static enum smf_state_result sleep_run(void *o)
 {
     struct app_object *s = (struct app_object *)o;
     uint32_t events = k_event_wait(&button_events,
@@ -439,11 +441,12 @@ static void sleep_run(void *o)
     if (events & BTN_RESET_EVENT) {
         s->wake_from_sleep = false;
         smf_set_state(SMF_CTX(s), &app_states[STATE_DEFAULTS]);
-        return;
+        return SMF_EVENT_HANDLED;;
     }
 
     s->wake_from_sleep = true;
     smf_set_state(SMF_CTX(s), &app_states[STATE_AWAKE]);
+    return SMF_EVENT_HANDLED;
 }
 
 static void error_entry(void *o)
@@ -459,13 +462,14 @@ static void error_entry(void *o)
             s->action_freq_hz, now_ns());
 }
 
-static void error_run(void *o)
+static enum smf_state_result error_run(void *o)
 {
     struct app_object *s = (struct app_object *)o;
     uint32_t events = k_event_wait(&button_events, BTN_RESET_EVENT, true, K_FOREVER);
 
     LOG_INF("Button Event Posted: %u", events);
     smf_set_state(SMF_CTX(s), &app_states[STATE_DEFAULTS]);
+    return SMF_EVENT_HANDLED;
 }
 
 static void error_exit(void *o)
@@ -511,15 +515,18 @@ void action_timer_handler(struct k_timer *t)
     struct app_object *s = (struct app_object *)k_timer_user_data_get(t);
     uint64_t now = now_ns();
 
-    if ((s != NULL) && (s->action_last_ns != 0U)) {
-        LOG_INF("action toggle period (ns): %llu", now - s->action_last_ns);
+    if (s == NULL) {
+        return;
     }
 
-    if (s != NULL) {
-        s->action_last_ns = now;
-        s->action_phase = !s->action_phase;
-        set_action_outputs_from_phase(s->action_phase);
+    if (s->action_last_ns != 0U) {
+        LOG_INF("action toggle period (ns): %llu",
+                (unsigned long long)(now - s->action_last_ns));
     }
+    s->action_last_ns = now;
+
+    s->action_phase = !s->action_phase;
+    set_action_outputs_from_phase(s->action_phase);
 }
 
 void action_timer_stop(struct k_timer *t)
@@ -557,21 +564,27 @@ void heartbeat_thread(void *, void *, void *)
     gpio_pin_set_dt(&heartbeat_led, 0);
 
     while (1) {
+        uint64_t now;
+
         k_msleep(HEARTBEAT_OFF_MS);
         gpio_pin_toggle_dt(&heartbeat_led);
 
+        now = now_ns();
         if (s_obj.hb_last_ns != 0U) {
-            LOG_INF("heart toggle period (ns): %llu", now_ns() - s_obj.hb_last_ns);
+            LOG_INF("heart toggle period (ns): %llu",
+                    (unsigned long long)(now - s_obj.hb_last_ns));
         }
-        s_obj.hb_last_ns = now_ns();
+        s_obj.hb_last_ns = now;
 
         k_msleep(HEARTBEAT_ON_MS);
         gpio_pin_toggle_dt(&heartbeat_led);
 
+        now = now_ns();
         if (s_obj.hb_last_ns != 0U) {
-            LOG_INF("heart toggle period (ns): %llu", now_ns() - s_obj.hb_last_ns);
+            LOG_INF("heart toggle period (ns): %llu",
+                    (unsigned long long)(now - s_obj.hb_last_ns));
         }
-        s_obj.hb_last_ns = now_ns();
+        s_obj.hb_last_ns = now;
     }
 }
 
