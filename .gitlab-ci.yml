@@ -75,7 +75,7 @@ check_state_diagram:
    image: ghcr.io/linuxcontainers/alpine:latest
    script:
      - |+
-       if [ -f "state_diagram.png" ]; then
+       if [ -f "docs/state_diagram.png" ]; then
          echo "state_diagram.png exists"
        else
          echo "state_diagram.png does not exist"
