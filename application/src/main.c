@@ -438,13 +438,7 @@ static void sleep_run(void *o)
 
 static void error_entry(void *o)
 {
-    ARG_UNUSED(o);
-}
-
-static void error_run(void *o)
-{
     struct app_object *s = (struct app_object *)o;
-    uint32_t events;
 
     k_timer_stop(&action_timer);
     clear_action_outputs();
@@ -453,19 +447,21 @@ static void error_run(void *o)
 
     LOG_ERR("ERROR: action_freq out of range (%d Hz) @ %llu ns",
             s->action_freq_hz, now_ns());
+}
 
-    events = k_event_wait(&button_events, BTN_RESET_EVENT, true, K_FOREVER);
+static void error_run(void *o)
+{
+    struct app_object *s = (struct app_object *)o;
+    uint32_t events = k_event_wait(&button_events, BTN_RESET_EVENT, true, K_FOREVER);
 
     LOG_INF("Button Event Posted: %u", events);
-    gpio_pin_set_dt(&error_led, 0);
-    enable_awake_buttons();
-
     smf_set_state(SMF_CTX(s), &app_states[STATE_DEFAULTS]);
 }
 
 static void error_exit(void *o)
 {
     ARG_UNUSED(o);
+    gpio_pin_set_dt(&error_led, 0);
 }
 
 static const struct smf_state app_states[] = {
