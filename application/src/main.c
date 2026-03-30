@@ -6,6 +6,7 @@
 #include <zephyr/sys/atomic.h>
 #include <zephyr/smf.h> 
 #include <zephyr/drivers/adc.h> 
+#include "calc_freq.h"
 // #include <zephyr/drivers/pwm.h> // CONFIG_PWM=y
 // #include "ble-lib.h" // BME554 BLE library (remember to add to CMakeLists.txt)
 
@@ -546,6 +547,7 @@ static int do_single_sample(struct app_object *s)
 static int do_diff_buffered_sample(struct app_object *s)
 {
     int ret;
+    double sample_rate_hz = 1000000.0 / (double)DIFF_SAMPLE_INTERVAL_US;
 
     struct adc_sequence_options options = {
         .extra_samplings = DIFF_BUFFER_LEN - 1,
@@ -568,6 +570,19 @@ static int do_diff_buffered_sample(struct app_object *s)
 
     LOG_INF("Buffered differential ADC read complete");
     LOG_HEXDUMP_INF(s->diff_buf, sizeof(s->diff_buf), "diff_buf");
+
+    s->diff_freq_hz = calc_freq_zero_crossing(s->diff_buf,
+                                              DIFF_BUFFER_LEN,
+                                              sample_rate_hz);
+
+    if (s->diff_freq_hz < 0.0) {
+        LOG_ERR("Differential ADC frequency calculation failed");
+        return -EINVAL;
+    }
+
+    LOG_INF("Buffered signal frequency: %d.%03d Hz",
+            (int)s->diff_freq_hz,
+            (int)((s->diff_freq_hz - (int)s->diff_freq_hz) * 1000.0));
 
     return 0;
 }
