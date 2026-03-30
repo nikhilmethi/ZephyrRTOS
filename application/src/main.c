@@ -163,9 +163,7 @@ struct app_object {
     struct smf_ctx ctx;
 
     uint64_t hb_last_ns;
-    uint64_t led1_last_ns;
 
-    bool adc_ready;
     bool led1_is_on;
 
     int16_t adc_raw;
@@ -255,9 +253,7 @@ static int init_app_object(struct app_object *s)
     }
 
     s->hb_last_ns = 0;
-    s->led1_last_ns = 0;
 
-    s->adc_ready = false;
     s->led1_is_on = false;
 
     s->adc_raw = 0;
@@ -368,8 +364,6 @@ static enum smf_state_result init_run(void *o)
         smf_set_state(SMF_CTX(s), &app_states[STATE_ERROR]);
         return SMF_EVENT_HANDLED;
     }
-
-    s->adc_ready = true;
 
     LOG_INF("Diff ADC buffer: %d samples, interval=%d us",
         DIFF_BUFFER_LEN, DIFF_SAMPLE_INTERVAL_US);
@@ -490,6 +484,8 @@ static enum smf_state_result led1_active_run(void *o)
 
 static void diff_buffered_entry(void *o)
 {
+    LOG_INF("Starting buffered differential ADC acquisition");
+
     struct app_object *s = (struct app_object *)o;
     int ret;
 
@@ -502,6 +498,7 @@ static void diff_buffered_entry(void *o)
         return;
     }
 
+    LOG_INF("Buffered acquisition complete → returning to IDLE");
     smf_set_state(SMF_CTX(s), &app_states[STATE_IDLE]);
 }
 
@@ -647,9 +644,7 @@ static int do_diff_buffered_sample(struct app_object *s)
         return -EINVAL;
     }
 
-    LOG_INF("Buffered signal frequency: %d.%03d Hz",
-            (int)s->diff_freq_hz,
-            (int)((s->diff_freq_hz - (int)s->diff_freq_hz) * 1000.0));
+    LOG_INF("Buffered signal frequency: %.3f Hz", s->diff_freq_hz);
 
     return 0;
 }
