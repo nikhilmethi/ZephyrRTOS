@@ -51,10 +51,11 @@ K_THREAD_DEFINE(heartbeat_thread_id,
 /* button events (main-facing) */
 #define BTN_SINGLE_SAMPLE_EVENT BIT(0)
 #define BTN_RESET_EVENT         BIT(1)
-#define BTN_EVENT_MASK          (BTN_SINGLE_SAMPLE_EVENT | BTN_RESET_EVENT)
+#define BTN_DIFF_BUFFERED_EVENT BIT(2)
+#define BTN_EVENT_MASK          (BTN_SINGLE_SAMPLE_EVENT | BTN_RESET_EVENT | BTN_DIFF_BUFFERED_EVENT)
 
-#define LED1_TIMER_EVENT        BIT(2)
-#define LED1_DONE_EVENT         BIT(3)
+#define LED1_TIMER_EVENT        BIT(3)
+#define LED1_DONE_EVENT         BIT(4)
 
 K_EVENT_DEFINE(button_events);
 
@@ -129,15 +130,24 @@ static const struct gpio_dt_spec sleep_button =
 static const struct gpio_dt_spec reset_button =
     GPIO_DT_SPEC_GET(DT_ALIAS(resetbutton), gpios);
 
+static const struct adc_dt_spec adc_single = 
+    ADC_DT_SPEC_GET_BY_ALIAS(vadc_single);
+
+static const struct adc_dt_spec adc_diff = 
+    ADC_DT_SPEC_GET_BY_ALIAS(vadc_diff);
+
+static const struct gpio_dt_spec freq_up_button = 
+    GPIO_DT_SPEC_GET(DT_ALIAS(frequpbutton), gpios);
+
 /* callback prototypes */
 void sleep_button_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins);
 void reset_button_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins);
+void freq_up_button_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins);
 
 /* callback structs */
 static struct gpio_callback sleep_button_cb;
 static struct gpio_callback reset_button_cb;
-static const struct adc_dt_spec adc_single = ADC_DT_SPEC_GET_BY_ALIAS(vadc_single);
-static const struct adc_dt_spec adc_diff = ADC_DT_SPEC_GET_BY_ALIAS(vadc_diff);
+static struct gpio_callback freq_up_button_cb;
 
 /* SMF state machine */
 enum app_state {
@@ -145,6 +155,7 @@ enum app_state {
     STATE_IDLE,
     STATE_SINGLE_SAMPLE,
     STATE_LED1_ACTIVE,
+    STATE_DIFF_BUFFERED,
     STATE_ERROR,
 };
 
@@ -178,6 +189,8 @@ static void start_led1_timers(struct app_object *s);
 static int do_single_sample(struct app_object *s);
 static int setup_adc_diff(void);
 static int do_diff_buffered_sample(struct app_object *s);
+static void enable_diff_buffered_button(void);
+static void disable_diff_buffered_button(void);
 
 static int setup_adc_single(void)
 {
@@ -215,6 +228,16 @@ static int setup_adc_diff(void)
     return 0;
 }
 
+static void enable_diff_buffered_button(void)
+{
+    gpio_pin_interrupt_configure_dt(&freq_up_button, GPIO_INT_EDGE_TO_ACTIVE);
+}
+
+static void disable_diff_buffered_button(void)
+{
+    gpio_pin_interrupt_configure_dt(&freq_up_button, GPIO_INT_DISABLE);
+}
+
 /* SMF state handlers */
 static void idle_entry(void *o);
 static enum smf_state_result idle_run(void *o);
@@ -222,6 +245,8 @@ static void single_sample_entry(void *o);
 static enum smf_state_result single_sample_run(void *o);
 static void led1_active_entry(void *o);
 static enum smf_state_result led1_active_run(void *o);
+static void diff_buffered_entry(void *o);
+static enum smf_state_result diff_buffered_run(void *o);
 
 static int init_app_object(struct app_object *s)
 {
@@ -295,6 +320,9 @@ static enum smf_state_result init_run(void *o)
     err = gpio_pin_configure_dt(&reset_button, GPIO_INPUT);
     if (err < 0) { LOG_ERR("Cannot configure reset button."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
 
+    err = gpio_pin_configure_dt(&freq_up_button, GPIO_INPUT);
+    if (err < 0) { LOG_ERR("Cannot configure freq_up button."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
+
     err = gpio_pin_configure_dt(&heartbeat_led, GPIO_OUTPUT_INACTIVE);
     if (err < 0) { LOG_ERR("Cannot configure heartbeat LED."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
 
@@ -310,6 +338,9 @@ static enum smf_state_result init_run(void *o)
     err = gpio_pin_interrupt_configure_dt(&reset_button, GPIO_INT_EDGE_TO_ACTIVE);
     if (err < 0) { LOG_ERR("Cannot attach callback to sw3."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
 
+    err = gpio_pin_interrupt_configure_dt(&freq_up_button, GPIO_INT_EDGE_TO_ACTIVE);
+    if (err < 0) { LOG_ERR("Cannot attach callback to sw1."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
+
     gpio_init_callback(&sleep_button_cb, sleep_button_callback, BIT(sleep_button.pin));
     err = gpio_add_callback_dt(&sleep_button, &sleep_button_cb);
     if (err < 0) { LOG_ERR("Cannot add sleep button callback."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
@@ -317,6 +348,10 @@ static enum smf_state_result init_run(void *o)
     gpio_init_callback(&reset_button_cb, reset_button_callback, BIT(reset_button.pin));
     err = gpio_add_callback_dt(&reset_button, &reset_button_cb);
     if (err < 0) { LOG_ERR("Cannot add reset button callback."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
+
+    gpio_init_callback(&freq_up_button_cb, freq_up_button_callback, BIT(freq_up_button.pin));
+    err = gpio_add_callback_dt(&freq_up_button, &freq_up_button_cb);
+    if (err < 0) { LOG_ERR("Cannot add freq_up button callback."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
 
     k_event_clear(&button_events, BTN_EVENT_MASK | LED1_TIMER_EVENT | LED1_DONE_EVENT);
 
@@ -350,6 +385,7 @@ static void idle_entry(void *o)
     gpio_pin_set_dt(&error_led, 0);
     set_led1(false);
     enable_single_sample_button();
+    enable_diff_buffered_button();
 
     LOG_INF("IDLE");
 }
@@ -371,6 +407,11 @@ static enum smf_state_result idle_run(void *o)
         return SMF_EVENT_HANDLED;
     }
 
+    if (events & BTN_DIFF_BUFFERED_EVENT) {
+        smf_set_state(SMF_CTX(s), &app_states[STATE_DIFF_BUFFERED]);
+        return SMF_EVENT_HANDLED;
+    }
+
     return SMF_EVENT_HANDLED;
 }
 
@@ -380,6 +421,7 @@ static void single_sample_entry(void *o)
     int ret;
 
     disable_single_sample_button();
+    disable_diff_buffered_button();
 
     ret = do_single_sample(s);
     if (ret < 0) {
@@ -446,6 +488,29 @@ static enum smf_state_result led1_active_run(void *o)
     return SMF_EVENT_HANDLED;
 }
 
+static void diff_buffered_entry(void *o)
+{
+    struct app_object *s = (struct app_object *)o;
+    int ret;
+
+    disable_single_sample_button();
+    disable_diff_buffered_button();
+
+    ret = do_diff_buffered_sample(s);
+    if (ret < 0) {
+        smf_set_state(SMF_CTX(s), &app_states[STATE_ERROR]);
+        return;
+    }
+
+    smf_set_state(SMF_CTX(s), &app_states[STATE_IDLE]);
+}
+
+static enum smf_state_result diff_buffered_run(void *o)
+{
+    ARG_UNUSED(o);
+    return SMF_EVENT_HANDLED;
+}
+
 static void error_entry(void *o)
 {
     struct app_object *s = (struct app_object *)o;
@@ -457,6 +522,7 @@ static void error_entry(void *o)
     set_led1(false);
     disable_single_sample_button();
     gpio_pin_set_dt(&error_led, 1);
+    disable_diff_buffered_button();
 
     LOG_ERR("Entered ERROR state");
 }
@@ -478,11 +544,12 @@ static void error_exit(void *o)
 }
 
 static const struct smf_state app_states[] = {
-    [STATE_INIT]          = SMF_CREATE_STATE(NULL,              init_run,            NULL, NULL, NULL),
-    [STATE_IDLE]          = SMF_CREATE_STATE(idle_entry,        idle_run,            NULL, NULL, NULL),
+    [STATE_INIT]          = SMF_CREATE_STATE(NULL,               init_run,            NULL, NULL, NULL),
+    [STATE_IDLE]          = SMF_CREATE_STATE(idle_entry,         idle_run,            NULL, NULL, NULL),
     [STATE_SINGLE_SAMPLE] = SMF_CREATE_STATE(single_sample_entry, single_sample_run, NULL, NULL, NULL),
-    [STATE_LED1_ACTIVE]   = SMF_CREATE_STATE(led1_active_entry, led1_active_run,     NULL, NULL, NULL),
-    [STATE_ERROR]         = SMF_CREATE_STATE(error_entry,       error_run,           error_exit, NULL, NULL),
+    [STATE_LED1_ACTIVE]   = SMF_CREATE_STATE(led1_active_entry,  led1_active_run,     NULL, NULL, NULL),
+    [STATE_DIFF_BUFFERED] = SMF_CREATE_STATE(diff_buffered_entry, diff_buffered_run,  NULL, NULL, NULL),
+    [STATE_ERROR]         = SMF_CREATE_STATE(error_entry,        error_run,           error_exit, NULL, NULL),
 };
 
 int main(void)
@@ -627,6 +694,14 @@ void reset_button_callback(const struct device *dev, struct gpio_callback *cb, u
     ARG_UNUSED(cb);
     ARG_UNUSED(pins);
     k_event_post(&button_events, BTN_RESET_EVENT);
+}
+
+void freq_up_button_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
+{
+    ARG_UNUSED(dev);
+    ARG_UNUSED(cb);
+    ARG_UNUSED(pins);
+    k_event_post(&button_events, BTN_DIFF_BUFFERED_EVENT);
 }
 
 /* threads */
