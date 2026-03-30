@@ -4,13 +4,18 @@
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/atomic.h>
-#include <zephyr/smf.h> // CONFIG_SMF=y
-
-// #include <zephyr/drivers/adc.h> // CONFIG_ADC=y
+#include <zephyr/smf.h> 
+#include <zephyr/drivers/adc.h> 
 // #include <zephyr/drivers/pwm.h> // CONFIG_PWM=y
 // #include "ble-lib.h" // BME554 BLE library (remember to add to CMakeLists.txt)
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
+#define ADC_DT_SPEC_GET_BY_ALIAS(adc_alias)                    \
+{                                                             \
+    .dev = DEVICE_DT_GET(DT_PARENT(DT_ALIAS(adc_alias))),      \
+    .channel_id = DT_REG_ADDR(DT_ALIAS(adc_alias)),            \
+    ADC_CHANNEL_CFG_FROM_DT_NODE(DT_ALIAS(adc_alias))          \
+}
 
 /* macros */
 #define LED_BLINK_FREQ_HZ 2
@@ -130,6 +135,8 @@ static struct gpio_callback reset_button_cb;
 static struct gpio_callback freq_up_button_cb;
 static struct gpio_callback freq_down_button_cb;
 
+static const struct adc_dt_spec adc_single = ADC_DT_SPEC_GET_BY_ALIAS(vadc_single);
+
 /* SMF state machine */
 enum app_state {
     STATE_INIT,
@@ -155,6 +162,11 @@ struct app_object {
 
     bool wake_from_sleep;
     bool threads_started;
+
+    bool adc_ready;
+    int16_t adc_raw;
+    int32_t adc_mv;
+    int led1_freq_hz;
 };
 
 static struct app_object s_obj;
@@ -168,6 +180,24 @@ static void enable_awake_buttons(void);
 static void disable_awake_buttons(void);
 static void start_action_timer_for_freq(struct app_object *s);
 static void restore_action_timer_after_sleep(struct app_object *s);
+
+static int setup_adc_single(void)
+{
+    int err;
+
+    if (!device_is_ready(adc_single.dev)) {
+        LOG_ERR("ADC device not ready");
+        return -ENODEV;
+    }
+
+    err = adc_channel_setup_dt(&adc_single);
+    if (err < 0) {
+        LOG_ERR("ADC channel setup failed (%d)", err);
+        return err;
+    }
+
+    return 0;
+}
 
 /* SMF state handlers */
 static enum smf_state_result init_run(void *o);
@@ -327,6 +357,15 @@ static enum smf_state_result init_run(void *o){
     }
 
     smf_set_state(SMF_CTX(s), &app_states[STATE_DEFAULTS]);
+
+    err = setup_adc_single();
+    if (err < 0) {
+        smf_set_state(SMF_CTX(s), &app_states[STATE_ERROR]);
+        return SMF_EVENT_HANDLED;
+    }
+
+    s->adc_ready = true;
+    
     return SMF_EVENT_HANDLED;
 }
 
@@ -506,6 +545,41 @@ int main(void)
     }
 
     return ret;
+}
+
+static int do_single_sample(struct app_object *s)
+{
+    int ret;
+    int16_t buf = 0;
+    int32_t val_mv = 0;
+
+    struct adc_sequence sequence = {
+        .buffer = &buf,
+        .buffer_size = sizeof(buf),
+    };
+
+    (void)adc_sequence_init_dt(&adc_single, &sequence);
+
+    ret = adc_read(adc_single.dev, &sequence);
+    if (ret < 0) {
+        LOG_ERR("ADC read failed (%d)", ret);
+        return ret;
+    }
+
+    s->adc_raw = buf;
+    val_mv = buf;
+
+    ret = adc_raw_to_millivolts_dt(&adc_single, &val_mv);
+    if (ret < 0) {
+        LOG_ERR("ADC conversion to mV failed");
+        return ret;
+    }
+
+    s->adc_mv = val_mv;
+
+    LOG_INF("ADC raw=%d, mv=%d", s->adc_raw, s->adc_mv);
+
+    return 0;
 }
 
 /* timer handlers */
