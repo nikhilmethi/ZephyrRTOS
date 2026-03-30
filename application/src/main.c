@@ -31,6 +31,13 @@ LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
 #define HEARTBEAT_STACK_SIZE 1024
 #define HEARTBEAT_THREAD_PRIO 5
 
+#define LED1_MIN_HZ 1
+#define LED1_MAX_HZ 5
+#define ADC_MAX_MV 3000
+
+#define LED1_DUTY_PERCENT 10
+#define LED1_ACTIVE_DURATION_MS 5000
+
 extern void heartbeat_thread(void *, void *, void *);
 
 /* heartbeat thread */
@@ -95,6 +102,44 @@ static inline uint64_t now_ns(void)
 static inline int32_t action_half_period_ms(int freq_hz)
 {
     return 1000 / (2 * freq_hz);
+}
+
+static int clamp_mv(int32_t mv)
+{
+    if (mv < 0) return 0;
+    if (mv > ADC_MAX_MV) return ADC_MAX_MV;
+    return mv;
+}
+
+static int map_mv_to_freq(int32_t mv)
+{
+    int mv_clamped = clamp_mv(mv);
+
+    return LED1_MIN_HZ +
+           (mv_clamped * (LED1_MAX_HZ - LED1_MIN_HZ)) / ADC_MAX_MV;
+}
+
+static int period_ms(int freq)
+{
+    return 1000 / freq;
+}
+
+static int on_time_ms(int freq)
+{
+    int p = period_ms(freq);
+    int on = (p * LED1_DUTY_PERCENT) / 100;
+
+    if (on < 1) on = 1;
+    return on;
+}
+
+static int off_time_ms(int freq)
+{
+    int p = period_ms(freq);
+    int off = p - on_time_ms(freq);
+
+    if (off < 1) off = 1;
+    return off;
 }
 
 /* hardware definitions */
@@ -355,9 +400,6 @@ static enum smf_state_result init_run(void *o){
         k_thread_start(doublepress_thread_id);
         s->threads_started = true;
     }
-
-    smf_set_state(SMF_CTX(s), &app_states[STATE_DEFAULTS]);
-
     err = setup_adc_single();
     if (err < 0) {
         smf_set_state(SMF_CTX(s), &app_states[STATE_ERROR]);
@@ -365,7 +407,8 @@ static enum smf_state_result init_run(void *o){
     }
 
     s->adc_ready = true;
-    
+
+    smf_set_state(SMF_CTX(s), &app_states[STATE_DEFAULTS]);
     return SMF_EVENT_HANDLED;
 }
 
@@ -576,7 +619,8 @@ static int do_single_sample(struct app_object *s)
     }
 
     s->adc_mv = val_mv;
-
+    s->led1_freq_hz = map_mv_to_freq(s->adc_mv);
+    
     LOG_INF("ADC raw=%d, mv=%d", s->adc_raw, s->adc_mv);
 
     return 0;
