@@ -1,30 +1,28 @@
 @startuml
-title Button Press -> ISR -> Kernel Event Bit Array -> State Machine Thread
+title Button Press -> ISR -> Kernel Event Bit Array -> State Machine Thread -> ADC -> LED1 Timers
 
 participant "User" as User
 participant "GPIO HW" as GPIO
-participant "Button ISR\nCallbacks\n(sleep/reset/freq_up/freq_down)" as ISR
+participant "Button ISR\nCallbacks\n(sleep/reset)" as ISR
 participant "Kernel Event\nBit Array\nbutton_events" as KEvents
 participant "State Machine Thread\n(main)" as Main
-participant "Action Timer\n(action_timer)" as ATimer
-participant "GPIO LEDs\n(iv_pump, buzzer, error)" as LEDs
+participant "ADC HW\n(adc_single)" as ADC
+participant "LED1 Blink Timer\n(led1_blink_timer)" as BlinkTimer
+participant "LED1 Done Timer\n(led1_done_timer)" as DoneTimer
+participant "GPIO LEDs\n(heartbeat, iv_pump, error)" as LEDs
 
-== AWAKE state: main waits for any button event ==
+== IDLE state: main waits for BUTTON0 or RESET ==
 Main -> KEvents : k_event_wait(BTN_EVENT_MASK,\nreset=true,\nK_FOREVER)\n[blocking]
 activate Main
 
-note over User : A button is pressed
+note over User : BUTTON0 or RESET is pressed
 User -> GPIO : physical button press
 GPIO -> ISR : interrupt fires
 
-alt Sleep button pressed
-  ISR -> KEvents : k_event_post(BTN_SLEEP_EVENT)
-else Reset button pressed
+alt BUTTON0 pressed
+  ISR -> KEvents : k_event_post(BTN_SINGLE_SAMPLE_EVENT)
+else RESET pressed
   ISR -> KEvents : k_event_post(BTN_RESET_EVENT)
-else Freq Up button pressed
-  ISR -> KEvents : k_event_post(BTN_FREQ_UP_EVENT)
-else Freq Down button pressed
-  ISR -> KEvents : k_event_post(BTN_FREQ_DOWN_EVENT)
 end
 
 note over KEvents : k_event_wait(..., reset=true)\nclears waited-on bits before returning
@@ -33,76 +31,98 @@ deactivate Main
 
 Main -> Main : LOG_INF("Button Event Posted: %u", events)
 
-alt Reset wins (events & BTN_RESET_EVENT)
+alt RESET wins (events & BTN_RESET_EVENT)
   Main -> LEDs : error_led = 0
-  Main -> GPIO : enable sleep/freq interrupts\n(GPIO_INT_EDGE_TO_ACTIVE)
-  Main -> ATimer : k_timer_stop()
-  Main -> Main : state = DEFAULTS
+  Main -> LEDs : iv_pump = 0
+  Main -> GPIO : enable BUTTON0 interrupt\n(GPIO_INT_EDGE_TO_ACTIVE)
+  Main -> Main : state = IDLE
 
-else Sleep toggle (events & BTN_SLEEP_EVENT)
-  Main -> ATimer : stored_action_remaining_ms =\n k_timer_remaining_get()
-  Main -> ATimer : k_timer_stop()
-  Main -> LEDs : iv_pump=0, buzzer=0
-  Main -> Main : state = SLEEP
-
-else Frequency event (UP/DOWN)
-  alt (events & BTN_FREQ_UP_EVENT)
-    Main -> Main : action_freq_hz += 1\nLOG_INF("FREQ_UP -> ...")
-  end
-  alt (events & BTN_FREQ_DOWN_EVENT)
-    Main -> Main : action_freq_hz -= 1\nLOG_INF("FREQ_DOWN -> ...")
-  end
-
-  alt out of range\n(action_freq_hz < 1 || > 5)
-    Main -> ATimer : k_timer_stop()
-    Main -> LEDs : iv_pump=0, buzzer=0, error_led=1
-    Main -> GPIO : disable sleep/freq interrupts\n(GPIO_INT_DISABLE)
-    Main -> Main : state = ERROR
-  else in range
-    Main -> ATimer : hp = action_half_period_ms(action_freq_hz)
-    Main -> ATimer : k_timer_start(hp, hp)
-    Main -> Main : state stays AWAKE
-  end
+else BUTTON0 pressed (events & BTN_SINGLE_SAMPLE_EVENT)
+  Main -> GPIO : disable BUTTON0 interrupt\n(GPIO_INT_DISABLE)
+  Main -> Main : state = SINGLE_SAMPLE
 end
 
-== SLEEP state: main waits for sleep or reset ==
-Main -> KEvents : k_event_wait(BTN_SLEEP_EVENT|BTN_RESET_EVENT,\nreset=true,\nK_FOREVER)\n[blocking]
+== SINGLE_SAMPLE state: main performs one ADC read ==
 activate Main
+Main -> ADC : adc_sequence_init_dt(...)
+Main -> ADC : adc_read(adc_single.dev, &sequence)
 
-note over User : Sleep or Reset pressed
-User -> GPIO : physical button press
-GPIO -> ISR : interrupt fires
+alt ADC read fails
+  ADC --> Main : ret < 0
+  Main -> LEDs : iv_pump = 0
+  Main -> LEDs : error_led = 1
+  Main -> GPIO : disable BUTTON0 interrupt\n(GPIO_INT_DISABLE)
+  Main -> Main : state = ERROR
 
-alt Sleep pressed (wake)
-  ISR -> KEvents : k_event_post(BTN_SLEEP_EVENT)
-else Reset pressed
-  ISR -> KEvents : k_event_post(BTN_RESET_EVENT)
+else ADC read succeeds
+  ADC --> Main : raw ADC buffer
+  Main -> ADC : adc_raw_to_millivolts_dt(...)
+  
+  alt ADC conversion fails
+    ADC --> Main : ret < 0
+    Main -> LEDs : iv_pump = 0
+    Main -> LEDs : error_led = 1
+    Main -> GPIO : disable BUTTON0 interrupt\n(GPIO_INT_DISABLE)
+    Main -> Main : state = ERROR
+
+  else ADC conversion succeeds
+    ADC --> Main : adc_mv
+    Main -> Main : led1_freq_hz = map_mv_to_freq(adc_mv)
+    Main -> Main : LOG_INF("ADC raw=%d, mv=%d, freq=%d Hz", ...)
+    Main -> Main : state = LED1_ACTIVE
+  end
 end
-
-note over KEvents : k_event_wait(..., reset=true)\nclears waited-on bits before returning
-KEvents --> Main : events bitmask returned
 deactivate Main
 
-Main -> Main : LOG_INF("Button Event Posted: %u", events)
+== LED1_ACTIVE state: main waits for blink, done, or reset ==
+activate Main
+Main -> LEDs : iv_pump = 1
+Main -> BlinkTimer : k_timer_start(on_ms, K_NO_WAIT)
+Main -> DoneTimer : k_timer_start(5000 ms, K_NO_WAIT)
+Main -> Main : led1_is_on = true
 
-alt Reset (events & BTN_RESET_EVENT)
-  Main -> LEDs : error_led=0
-  Main -> GPIO : enable sleep/freq interrupts\n(GPIO_INT_EDGE_TO_ACTIVE)
-  Main -> ATimer : k_timer_stop()
-  Main -> Main : state = DEFAULTS
+Main -> KEvents : k_event_wait(BTN_RESET_EVENT | LED1_TIMER_EVENT |\nLED1_DONE_EVENT,\nreset=true,\nK_FOREVER)\n[blocking]
 
-else Wake on sleep (events & BTN_SLEEP_EVENT)
-  Main -> LEDs : restore iv_pump/buzzer\nbased on stored_action_phase
-  Main -> ATimer : hp = action_half_period_ms(stored_action_freq_hz)
-  Main -> ATimer : k_timer_start(first_ms, hp)
-  Main -> Main : state = AWAKE
+alt Blink timer expires
+  BlinkTimer -> KEvents : k_event_post(LED1_TIMER_EVENT)
+  KEvents --> Main : events bitmask returned
+
+  Main -> Main : led1_is_on = !led1_is_on
+  alt led1_is_on = true
+    Main -> LEDs : iv_pump = 1
+    Main -> BlinkTimer : k_timer_start(on_time_ms, K_NO_WAIT)
+  else led1_is_on = false
+    Main -> LEDs : iv_pump = 0
+    Main -> BlinkTimer : k_timer_start(off_time_ms, K_NO_WAIT)
+  end
+  Main -> Main : state stays LED1_ACTIVE
+
+else 5 second done timer expires
+  DoneTimer -> KEvents : k_event_post(LED1_DONE_EVENT)
+  KEvents --> Main : events bitmask returned
+
+  Main -> BlinkTimer : k_timer_stop()
+  Main -> LEDs : iv_pump = 0
+  Main -> Main : state = IDLE
+
+else RESET pressed
+  User -> GPIO : physical button press
+  GPIO -> ISR : interrupt fires
+  ISR -> KEvents : k_event_post(BTN_RESET_EVENT)
+  KEvents --> Main : events bitmask returned
+
+  Main -> BlinkTimer : k_timer_stop()
+  Main -> DoneTimer : k_timer_stop()
+  Main -> LEDs : iv_pump = 0
+  Main -> Main : state = IDLE
 end
+deactivate Main
 
-== ERROR state: main waits for reset only ==
+== ERROR state: main waits for RESET only ==
 Main -> KEvents : k_event_wait(BTN_RESET_EVENT,\nreset=true,\nK_FOREVER)\n[blocking]
 activate Main
 
-note over User : Reset pressed
+note over User : RESET is pressed
 User -> GPIO : physical button press
 GPIO -> ISR : interrupt fires
 ISR -> KEvents : k_event_post(BTN_RESET_EVENT)
@@ -111,9 +131,8 @@ note over KEvents : k_event_wait(..., reset=true)\nclears waited-on bits before 
 KEvents --> Main : events bitmask returned
 deactivate Main
 
-Main -> LEDs : error_led=0
-Main -> GPIO : enable sleep/freq interrupts\n(GPIO_INT_EDGE_TO_ACTIVE)
-Main -> ATimer : k_timer_stop()
-Main -> Main : state = DEFAULTS
+Main -> LEDs : error_led = 0
+Main -> LEDs : iv_pump = 0
+Main -> Main : state = IDLE
 
 @enduml

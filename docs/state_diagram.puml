@@ -3,73 +3,64 @@
 
 state INIT {
     init_run: Check GPIO0 interface ready
-    init_run: Configure all LEDs + buttons
-    init_run: Configure interrupts + callbacks for all 4 buttons
+    init_run: Configure BUTTON0 + RESET as inputs
+    init_run: Configure heartbeat LED, LED1, and error LED as outputs
+    init_run: Configure interrupts + callbacks for BUTTON0 and RESET
     init_run: Clear button event masks
-    init_run: Set action_timer user data
-    init_run: Start heartbeat + doublepress threads once
+    init_run: Set heartbeat thread name
+    init_run: Setup single ADC channel from Devicetree
 }
 
-INIT -d-> DEFAULTS : Successful completion
+INIT -d-> IDLE : Successful completion
+INIT -d-> ERROR : ADC setup failure
 
-state DEFAULTS {
-    defaults_entry: Restore default action_freq_hz = 2 Hz
-    defaults_entry: Restore default action_phase baseline (ivpump ON, buzzer OFF)
-    defaults_entry: Store defaults for sleep restore
-    defaults_entry: Clear stored remaining timer time
-    defaults_entry: Clear wake_from_sleep flag
-    defaults_entry: Ensure error LED OFF
-    defaults_entry: Enable sleep/freq button interrupts
-    defaults_entry: Set action outputs from current phase
-    defaults_entry: Start action timer at default frequency
+state IDLE {
+    idle_entry: Ensure error LED OFF
+    idle_entry: Ensure LED1 OFF
+    idle_entry: Enable BUTTON0 interrupt
+    idle_run: Wait for button event
+    idle_run: RESET re-enters IDLE
+    idle_run: BUTTON0 enters SINGLE_SAMPLE
 }
 
-DEFAULTS --> AWAKE : Successful completion
+IDLE --> IDLE : RESET
+IDLE --> SINGLE_SAMPLE : BUTTON0
 
-state AWAKE {
-    awake_entry: Ensure error LED OFF
-    awake_entry: Enable sleep/freq button interrupts
-    awake_entry: If wake_from_sleep is set, restore stored action_freq_hz
-    awake_entry: If wake_from_sleep is set, restore stored action_phase
-    awake_entry: If wake_from_sleep is set, resume action timer from stored remaining time
-    awake_entry: Clear wake_from_sleep flag
-    awake_run: Wait for button event
-    awake_run: Reset_button enters DEFAULTS
-    awake_run: Sleep_button enters SLEEP
-    awake_run: Freq_up_button increments action_freq_hz (single = +1, double = +2)
-    awake_run: Freq_down_button decrements action_freq_hz (single = -1, double = -2)
-    awake_run: Check bounds (valid between 1 and 5 Hz); else enter ERROR
-    awake_run: If freq changed and still valid, restart action timer at new frequency
+state SINGLE_SAMPLE {
+    single_sample_entry: Disable BUTTON0 interrupt
+    single_sample_entry: Read one ADC sample from AIN0
+    single_sample_entry: Convert raw ADC buffer to mV
+    single_sample_entry: Linearly map 0-3000 mV to 1-5 Hz
+    single_sample_entry: Log raw ADC value, voltage, and mapped frequency
 }
 
-AWAKE --> DEFAULTS : Reset_button
-AWAKE --> SLEEP : Sleep_button
-AWAKE --> ERROR : Out-of-range action_freq_hz
+SINGLE_SAMPLE --> LED1_ACTIVE : Successful ADC read
+SINGLE_SAMPLE --> ERROR : ADC read/conversion failure
 
-state SLEEP {
-    sleep_entry: Store action_freq_hz
-    sleep_entry: Store action_phase
-    sleep_entry: Store remaining timer time
-    sleep_entry: Clear wake_from_sleep flag
-    sleep_entry: Stop action timer
-    sleep_entry: Disable action LEDs (buzzer OFF, ivpump OFF)
-    sleep_run: Wait for sleep or reset button event
-    sleep_run: Reset_button clears wake_from_sleep and enters DEFAULTS
-    sleep_run: Sleep_button sets wake_from_sleep and enters AWAKE
+state LED1_ACTIVE {
+    led1_active_entry: Start LED1 blink timer using mapped frequency
+    led1_active_entry: Start 5 second done timer
+    led1_active_entry: Set LED1 initially ON
+    led1_active_run: Wait for LED1 timer, done timer, or RESET event
+    led1_active_run: Toggle LED1 ON/OFF at mapped frequency
+    led1_active_run: Maintain 10 percent duty cycle
+    led1_active_run: RESET stops timers, turns LED1 OFF, enters IDLE
+    led1_active_run: Done timer stops blinking after 5 seconds and enters IDLE
 }
 
-SLEEP --> DEFAULTS : Reset_button
-SLEEP --> AWAKE : Sleep_button
+LED1_ACTIVE --> IDLE : RESET
+LED1_ACTIVE --> IDLE : 5 second timer complete
 
 state ERROR {
-    error_entry: Stop action timer
-    error_entry: Disable action LEDs (buzzer OFF, ivpump OFF)
+    error_entry: Stop LED1 blink timer
+    error_entry: Stop LED1 done timer
+    error_entry: Turn LED1 OFF
+    error_entry: Disable BUTTON0 interrupt
     error_entry: Turn error LED ON (continuous)
-    error_entry: Disable sleep/freq buttons (interrupts disabled)
     error_entry: Issue LOG_ERR(descriptive, once)
-    error_run: Wait for reset button event
+    error_run: Wait for RESET event
     error_exit: Turn error LED OFF
 }
 
-ERROR --> DEFAULTS : Reset_button
+ERROR --> IDLE : RESET
 @enduml
