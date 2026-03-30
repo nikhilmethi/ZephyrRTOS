@@ -31,6 +31,13 @@ LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
 #define LED1_DUTY_PERCENT 10
 #define LED1_ACTIVE_DURATION_MS 5000
 
+#define DIFF_SAMPLE_INTERVAL_US 5000   // 5 ms → 200 Hz sampling
+#define DIFF_SIGNAL_FREQ_HZ     10     // expected input signal
+#define DIFF_NUM_CYCLES         20
+
+#define DIFF_BUFFER_LEN ((DIFF_NUM_CYCLES * 1000000) / \
+                        (DIFF_SIGNAL_FREQ_HZ * DIFF_SAMPLE_INTERVAL_US))
+
 extern void heartbeat_thread(void *, void *, void *);
 
 /* heartbeat thread */
@@ -141,7 +148,7 @@ enum app_state {
 };
 
 struct app_object {
-    struct smf_ctx ctx;   /* must be first */
+    struct smf_ctx ctx;
 
     uint64_t hb_last_ns;
     uint64_t led1_last_ns;
@@ -152,6 +159,10 @@ struct app_object {
     int16_t adc_raw;
     int32_t adc_mv;
     int led1_freq_hz;
+
+    /* buffered differential ADC */
+    int16_t diff_buf[DIFF_BUFFER_LEN];
+    double diff_freq_hz;
 };
 
 static struct app_object s_obj;
@@ -225,6 +236,12 @@ static int init_app_object(struct app_object *s)
     s->adc_raw = 0;
     s->adc_mv = 0;
     s->led1_freq_hz = LED1_MIN_HZ;
+
+    s->diff_freq_hz = 0.0;
+
+    for (size_t i = 0; i < DIFF_BUFFER_LEN; i++) {
+        s->diff_buf[i] = 0;
+    }
 
     return 0;
 }
@@ -316,6 +333,9 @@ static enum smf_state_result init_run(void *o)
     }
 
     s->adc_ready = true;
+
+    LOG_INF("Diff ADC buffer: %d samples, interval=%d us",
+        DIFF_BUFFER_LEN, DIFF_SAMPLE_INTERVAL_US);
 
     smf_set_state(SMF_CTX(s), &app_states[STATE_IDLE]);
     return SMF_EVENT_HANDLED;
