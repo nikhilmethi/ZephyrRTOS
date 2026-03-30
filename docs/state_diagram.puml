@@ -3,12 +3,14 @@
 
 state INIT {
     init_run: Check GPIO0 interface ready
-    init_run: Configure BUTTON0 + RESET as inputs
+    init_run: Configure BUTTON0, BUTTON1, and RESET as inputs
     init_run: Configure heartbeat LED, LED1, and error LED as outputs
-    init_run: Configure interrupts + callbacks for BUTTON0 and RESET
+    init_run: Configure interrupts + callbacks for BUTTON0, BUTTON1, and RESET
     init_run: Clear button event masks
     init_run: Set heartbeat thread name
     init_run: Setup single ADC channel from Devicetree
+    init_run: Setup differential ADC channel from Devicetree
+    init_run: Log differential ADC buffer size and sampling interval
 }
 
 INIT -d-> IDLE : Successful completion
@@ -18,16 +20,20 @@ state IDLE {
     idle_entry: Ensure error LED OFF
     idle_entry: Ensure LED1 OFF
     idle_entry: Enable BUTTON0 interrupt
+    idle_entry: Enable BUTTON1 interrupt
     idle_run: Wait for button event
     idle_run: RESET re-enters IDLE
     idle_run: BUTTON0 enters SINGLE_SAMPLE
+    idle_run: BUTTON1 enters DIFF_BUFFERED
 }
 
 IDLE --> IDLE : RESET
 IDLE --> SINGLE_SAMPLE : BUTTON0
+IDLE --> DIFF_BUFFERED : BUTTON1
 
 state SINGLE_SAMPLE {
     single_sample_entry: Disable BUTTON0 interrupt
+    single_sample_entry: Disable BUTTON1 interrupt
     single_sample_entry: Read one ADC sample from AIN0
     single_sample_entry: Convert raw ADC buffer to mV
     single_sample_entry: Linearly map 0-3000 mV to 1-5 Hz
@@ -51,11 +57,26 @@ state LED1_ACTIVE {
 LED1_ACTIVE --> IDLE : RESET
 LED1_ACTIVE --> IDLE : 5 second timer complete
 
+state DIFF_BUFFERED {
+    diff_buffered_entry: Disable BUTTON0 interrupt
+    diff_buffered_entry: Disable BUTTON1 interrupt
+    diff_buffered_entry: Start buffered differential ADC acquisition
+    diff_buffered_entry: Sample AIN1-AIN2 into array using one adc_read call
+    diff_buffered_entry: Log buffered ADC capture
+    diff_buffered_entry: Calculate buffered signal frequency
+    diff_buffered_entry: Log calculated buffered frequency
+    diff_buffered_entry: Return to IDLE after successful completion
+}
+
+DIFF_BUFFERED --> IDLE : Successful buffered acquisition
+DIFF_BUFFERED --> ERROR : Buffered ADC read/frequency calculation failure
+
 state ERROR {
     error_entry: Stop LED1 blink timer
     error_entry: Stop LED1 done timer
     error_entry: Turn LED1 OFF
     error_entry: Disable BUTTON0 interrupt
+    error_entry: Disable BUTTON1 interrupt
     error_entry: Turn error LED ON (continuous)
     error_entry: Issue LOG_ERR(descriptive, once)
     error_run: Wait for RESET event
