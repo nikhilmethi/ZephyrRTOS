@@ -176,6 +176,7 @@ static void disable_single_sample_button(void);
 static void start_led1_timers(struct app_object *s);
 static int do_single_sample(struct app_object *s);
 static int setup_adc_diff(void);
+static int do_diff_buffered_sample(struct app_object *s);
 
 static int setup_adc_single(void)
 {
@@ -538,6 +539,35 @@ static int do_single_sample(struct app_object *s)
 
     LOG_INF("ADC raw=%d, mv=%d, freq=%d Hz",
         s->adc_raw, s->adc_mv, s->led1_freq_hz);
+
+    return 0;
+}
+
+static int do_diff_buffered_sample(struct app_object *s)
+{
+    int ret;
+
+    struct adc_sequence_options options = {
+        .extra_samplings = DIFF_BUFFER_LEN - 1,
+        .interval_us = DIFF_SAMPLE_INTERVAL_US,
+    };
+
+    struct adc_sequence sequence = {
+        .options = &options,
+        .buffer = s->diff_buf,
+        .buffer_size = sizeof(s->diff_buf),
+    };
+
+    (void)adc_sequence_init_dt(&adc_diff, &sequence);
+
+    ret = adc_read(adc_diff.dev, &sequence);
+    if (ret < 0) {
+        LOG_ERR("Differential ADC buffered read failed (%d)", ret);
+        return ret;
+    }
+
+    LOG_INF("Buffered differential ADC read complete");
+    LOG_HEXDUMP_INF(s->diff_buf, sizeof(s->diff_buf), "diff_buf");
 
     return 0;
 }
