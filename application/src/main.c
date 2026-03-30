@@ -129,6 +129,7 @@ void reset_button_callback(const struct device *dev, struct gpio_callback *cb, u
 static struct gpio_callback sleep_button_cb;
 static struct gpio_callback reset_button_cb;
 static const struct adc_dt_spec adc_single = ADC_DT_SPEC_GET_BY_ALIAS(vadc_single);
+static const struct adc_dt_spec adc_diff = ADC_DT_SPEC_GET_BY_ALIAS(vadc_diff);
 
 /* SMF state machine */
 enum app_state {
@@ -163,6 +164,7 @@ static void enable_single_sample_button(void);
 static void disable_single_sample_button(void);
 static void start_led1_timers(struct app_object *s);
 static int do_single_sample(struct app_object *s);
+static int setup_adc_diff(void);
 
 static int setup_adc_single(void)
 {
@@ -176,6 +178,24 @@ static int setup_adc_single(void)
     err = adc_channel_setup_dt(&adc_single);
     if (err < 0) {
         LOG_ERR("ADC channel setup failed (%d)", err);
+        return err;
+    }
+
+    return 0;
+}
+
+static int setup_adc_diff(void)
+{
+    int err;
+
+    if (!device_is_ready(adc_diff.dev)) {
+        LOG_ERR("Differential ADC device not ready");
+        return -ENODEV;
+    }
+
+    err = adc_channel_setup_dt(&adc_diff);
+    if (err < 0) {
+        LOG_ERR("Differential ADC channel setup failed (%d)", err);
         return err;
     }
 
@@ -284,6 +304,12 @@ static enum smf_state_result init_run(void *o)
     k_thread_name_set(heartbeat_thread_id, "heartbeat");
 
     err = setup_adc_single();
+    if (err < 0) {
+        smf_set_state(SMF_CTX(s), &app_states[STATE_ERROR]);
+        return SMF_EVENT_HANDLED;
+    }
+
+    err = setup_adc_diff();
     if (err < 0) {
         smf_set_state(SMF_CTX(s), &app_states[STATE_ERROR]);
         return SMF_EVENT_HANDLED;
