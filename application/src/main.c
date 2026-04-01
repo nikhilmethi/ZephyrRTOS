@@ -39,6 +39,8 @@ LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
 #define DIFF_BUFFER_LEN ((DIFF_NUM_CYCLES * 1000000) / \
                         (DIFF_SIGNAL_FREQ_HZ * DIFF_SAMPLE_INTERVAL_US))
 
+#define ADC_ASYNC_TIMEOUT_MS 2000
+
 extern void heartbeat_thread(void *, void *, void *);
 
 /* heartbeat thread */
@@ -173,6 +175,10 @@ struct app_object {
     /* buffered differential ADC */
     int16_t diff_buf[DIFF_BUFFER_LEN];
     double diff_freq_hz;
+
+    /* async ADC support */
+    struct k_poll_signal adc_async_signal;
+    struct k_poll_event adc_async_evt;
 };
 
 static struct app_object s_obj;
@@ -189,6 +195,10 @@ static int setup_adc_diff(void);
 static int do_diff_buffered_sample(struct app_object *s);
 static void enable_diff_buffered_button(void);
 static void disable_diff_buffered_button(void);
+static enum adc_action adc_async_callback(const struct device *dev,
+                                          const struct adc_sequence *sequence,
+                                          uint16_t sampling_index);
+static int do_diff_buffered_sample_async(struct app_object *s);
 
 static int setup_adc_single(void)
 {
@@ -265,6 +275,14 @@ static int init_app_object(struct app_object *s)
     for (size_t i = 0; i < DIFF_BUFFER_LEN; i++) {
         s->diff_buf[i] = 0;
     }
+
+    k_poll_signal_init(&s->adc_async_signal);
+
+    s->adc_async_evt = (struct k_poll_event)K_POLL_EVENT_INITIALIZER(
+        K_POLL_TYPE_SIGNAL,
+        K_POLL_MODE_NOTIFY_ONLY,
+        &s->adc_async_signal
+    );
 
     return 0;
 }
@@ -367,6 +385,8 @@ static enum smf_state_result init_run(void *o)
 
     LOG_INF("Diff ADC buffer: %d samples, interval=%d us",
         DIFF_BUFFER_LEN, DIFF_SAMPLE_INTERVAL_US);
+
+    LOG_INF("Async ADC timeout: %d ms", ADC_ASYNC_TIMEOUT_MS);
 
     smf_set_state(SMF_CTX(s), &app_states[STATE_IDLE]);
     return SMF_EVENT_HANDLED;
