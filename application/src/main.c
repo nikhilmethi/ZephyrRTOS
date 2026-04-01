@@ -505,7 +505,7 @@ static enum smf_state_result led1_active_run(void *o)
 
 static void diff_buffered_entry(void *o)
 {
-    LOG_INF("Starting buffered differential ADC acquisition");
+    LOG_INF("Starting async buffered differential ADC acquisition");
 
     struct app_object *s = (struct app_object *)o;
     int ret;
@@ -513,13 +513,13 @@ static void diff_buffered_entry(void *o)
     disable_single_sample_button();
     disable_diff_buffered_button();
 
-    ret = do_diff_buffered_sample(s);
+    ret = do_diff_buffered_sample_async(s);
     if (ret < 0) {
         smf_set_state(SMF_CTX(s), &app_states[STATE_ERROR]);
         return;
     }
 
-    LOG_INF("Buffered acquisition complete → returning to IDLE");
+    LOG_INF("Async buffered acquisition complete → returning to IDLE");
     smf_set_state(SMF_CTX(s), &app_states[STATE_IDLE]);
 }
 
