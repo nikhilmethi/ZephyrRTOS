@@ -14,8 +14,8 @@
         freqdownbutton = &button2;
         resetbutton = &button3;
 
-        vadc_single = &vadc_single;
-        vadc_diff = &vadc_diff;
+        vadc-single = &vadc_single;
+        vadc-diff = &vadc_diff;
 	};
 };
 
