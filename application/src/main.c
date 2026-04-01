@@ -199,6 +199,7 @@ static enum adc_action adc_async_callback(const struct device *dev,
                                           uint16_t sampling_index);
 static int do_diff_buffered_sample_async(struct app_object *s);
 static void reset_adc_async_poll(struct app_object *s);
+static int fail_adc_async(struct app_object *s, int err, const char *msg);
 
 static int setup_adc_single(void)
 {
@@ -541,7 +542,7 @@ static void error_entry(void *o)
     gpio_pin_set_dt(&error_led, 1);
     disable_diff_buffered_button();
 
-    LOG_ERR("Entered ERROR state");
+    LOG_ERR("Entered ERROR state; async/sync ADC flow aborted");
 }
 
 static enum smf_state_result error_run(void *o)
@@ -632,6 +633,7 @@ static int do_diff_buffered_sample_async(struct app_object *s)
 {
     int ret;
     int signaled;
+    int poll_result;
     double sample_rate_hz = 1000000.0 / (double)DIFF_SAMPLE_INTERVAL_US;
 
     struct adc_sequence_options options = {
@@ -652,36 +654,26 @@ static int do_diff_buffered_sample_async(struct app_object *s)
 
     ret = adc_read_async(adc_diff.dev, &sequence, &s->adc_async_signal);
     if (ret < 0) {
-        LOG_ERR("Differential ADC async start failed (%d)", ret);
-        return ret;
+        return fail_adc_async(s, ret, "Differential ADC async start failed");
     }
 
     LOG_INF("Async differential ADC acquisition started");
 
     ret = k_poll(&s->adc_async_evt, 1, K_MSEC(ADC_ASYNC_TIMEOUT_MS));
-    if (ret < 0) {
-        LOG_ERR("ADC async poll failed (%d)", ret);
-        reset_adc_async_poll(s);
-        return ret;
-    }
-
     if (ret == -EAGAIN) {
-        LOG_ERR("ADC async acquisition timed out after %d ms", ADC_ASYNC_TIMEOUT_MS);
-        reset_adc_async_poll(s);
-        return -ETIMEDOUT;
+        return fail_adc_async(s, -ETIMEDOUT, "ADC async acquisition timed out");
+    }
+    if (ret < 0) {
+        return fail_adc_async(s, ret, "ADC async poll failed");
     }
 
     if (s->adc_async_evt.state != K_POLL_STATE_SIGNALED) {
-        LOG_ERR("ADC async poll returned without signal");
-        reset_adc_async_poll(s);
-        return -EIO;
+        return fail_adc_async(s, -EIO, "ADC async poll returned without signal");
     }
 
-    k_poll_signal_check(&s->adc_async_signal, &signaled, &ret);
+    k_poll_signal_check(&s->adc_async_signal, &signaled, &poll_result);
     if (!signaled) {
-        LOG_ERR("ADC async signal not raised");
-        reset_adc_async_poll(s);
-        return -EIO;
+        return fail_adc_async(s, -EIO, "ADC async signal not raised");
     }
 
     reset_adc_async_poll(s);
@@ -694,8 +686,7 @@ static int do_diff_buffered_sample_async(struct app_object *s)
                                               sample_rate_hz);
 
     if (s->diff_freq_hz < 0.0) {
-        LOG_ERR("Differential ADC frequency calculation failed");
-        return -EINVAL;
+        return fail_adc_async(s, -EINVAL, "Differential ADC frequency calculation failed");
     }
 
     LOG_INF("Async buffered signal frequency: %.3f Hz", s->diff_freq_hz);
@@ -720,8 +711,22 @@ static enum adc_action adc_async_callback(const struct device *dev,
 
 static void reset_adc_async_poll(struct app_object *s)
 {
+    unsigned int signaled;
+    int result;
+
+    k_poll_signal_check(&s->adc_async_signal, &signaled, &result);
+    ARG_UNUSED(signaled);
+    ARG_UNUSED(result);
+
     k_poll_signal_reset(&s->adc_async_signal);
     s->adc_async_evt.state = K_POLL_STATE_NOT_READY;
+}
+
+static int fail_adc_async(struct app_object *s, int err, const char *msg)
+{
+    LOG_ERR("%s (%d)", msg, err);
+    reset_adc_async_poll(s);
+    return err;
 }
 
 /* timer handlers */
