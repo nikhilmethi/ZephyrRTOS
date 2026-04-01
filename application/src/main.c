@@ -636,6 +636,7 @@ static int do_diff_buffered_sample(struct app_object *s)
     struct adc_sequence_options options = {
         .extra_samplings = DIFF_BUFFER_LEN - 1,
         .interval_us = DIFF_SAMPLE_INTERVAL_US,
+        .callback = adc_async_callback,
     };
 
     struct adc_sequence sequence = {
@@ -667,6 +668,21 @@ static int do_diff_buffered_sample(struct app_object *s)
     LOG_INF("Buffered signal frequency: %.3f Hz", s->diff_freq_hz);
 
     return 0;
+}
+
+static enum adc_action adc_async_callback(const struct device *dev,
+                                          const struct adc_sequence *sequence,
+                                          uint16_t sampling_index)
+{
+    ARG_UNUSED(dev);
+    ARG_UNUSED(sequence);
+
+#if CONFIG_LOG_DEFAULT_LEVEL >= 4
+    LOG_DBG("ADC async sample index: %u", sampling_index);
+#endif
+
+    /* For now: continue normally through the sequence */
+    return ADC_ACTION_CONTINUE;
 }
 
 /* timer handlers */
