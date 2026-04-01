@@ -192,7 +192,6 @@ static void disable_single_sample_button(void);
 static void start_led1_timers(struct app_object *s);
 static int do_single_sample(struct app_object *s);
 static int setup_adc_diff(void);
-static int do_diff_buffered_sample(struct app_object *s);
 static void enable_diff_buffered_button(void);
 static void disable_diff_buffered_button(void);
 static enum adc_action adc_async_callback(const struct device *dev,
@@ -505,7 +504,7 @@ static enum smf_state_result led1_active_run(void *o)
 
 static void diff_buffered_entry(void *o)
 {
-    LOG_INF("Starting async buffered differential ADC acquisition");
+    LOG_INF("Starting async buffered differential ADC sequence");
 
     struct app_object *s = (struct app_object *)o;
     int ret;
@@ -519,7 +518,7 @@ static void diff_buffered_entry(void *o)
         return;
     }
 
-    LOG_INF("Async buffered acquisition complete → returning to IDLE");
+    LOG_INF("Async buffered differential ADC sequence complete → returning to IDLE");
     smf_set_state(SMF_CTX(s), &app_states[STATE_IDLE]);
 }
 
@@ -629,48 +628,6 @@ static int do_single_sample(struct app_object *s)
     return 0;
 }
 
-static int do_diff_buffered_sample(struct app_object *s)
-{
-    int ret;
-    double sample_rate_hz = 1000000.0 / (double)DIFF_SAMPLE_INTERVAL_US;
-
-    struct adc_sequence_options options = {
-        .extra_samplings = DIFF_BUFFER_LEN - 1,
-        .interval_us = DIFF_SAMPLE_INTERVAL_US,
-        .callback = adc_async_callback,
-    };
-
-    struct adc_sequence sequence = {
-        .options = &options,
-        .buffer = s->diff_buf,
-        .buffer_size = sizeof(s->diff_buf),
-    };
-
-    (void)adc_sequence_init_dt(&adc_diff, &sequence);
-
-    ret = adc_read(adc_diff.dev, &sequence);
-    if (ret < 0) {
-        LOG_ERR("Differential ADC buffered read failed (%d)", ret);
-        return ret;
-    }
-
-    LOG_INF("Buffered differential ADC read complete");
-    LOG_HEXDUMP_INF(s->diff_buf, sizeof(s->diff_buf), "diff_buf");
-
-    s->diff_freq_hz = calc_freq_zero_crossing(s->diff_buf,
-                                              DIFF_BUFFER_LEN,
-                                              sample_rate_hz);
-
-    if (s->diff_freq_hz < 0.0) {
-        LOG_ERR("Differential ADC frequency calculation failed");
-        return -EINVAL;
-    }
-
-    LOG_INF("Buffered signal frequency: %.3f Hz", s->diff_freq_hz);
-
-    return 0;
-}
-
 static int do_diff_buffered_sample_async(struct app_object *s)
 {
     int ret;
@@ -730,7 +687,7 @@ static int do_diff_buffered_sample_async(struct app_object *s)
     reset_adc_async_poll(s);
 
     LOG_INF("Async differential ADC read complete");
-    LOG_HEXDUMP_INF(s->diff_buf, sizeof(s->diff_buf), "diff_buf");
+    LOG_HEXDUMP_INF(s->diff_buf, sizeof(s->diff_buf), "async_diff_buf");
 
     s->diff_freq_hz = calc_freq_zero_crossing(s->diff_buf,
                                               DIFF_BUFFER_LEN,
@@ -741,7 +698,7 @@ static int do_diff_buffered_sample_async(struct app_object *s)
         return -EINVAL;
     }
 
-    LOG_INF("Buffered signal frequency: %.3f Hz", s->diff_freq_hz);
+    LOG_INF("Async buffered signal frequency: %.3f Hz", s->diff_freq_hz);
 
     return 0;
 }
