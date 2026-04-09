@@ -73,29 +73,29 @@ static int clamp_mv(int32_t mv)
     return mv;
 }
 
-static int map_mv_to_freq(int32_t mv)
+static double map_mv_to_freq(int32_t mv)
 {
-    int mv_clamped = clamp_mv(mv);
+    double mv_clamped = (double)clamp_mv(mv);
 
-    return LED1_MIN_HZ +
-           (mv_clamped * (LED1_MAX_HZ - LED1_MIN_HZ)) / ADC_MAX_MV;
+    return (double)LED1_MIN_HZ +
+           mv_clamped * ((double)(LED1_MAX_HZ - LED1_MIN_HZ)) / (double)ADC_MAX_MV;
 }
 
-static int period_ms(int freq)
+static int period_ms(double freq)
 {
-    return 1000 / freq;
+    return (int)(1000.0 / freq);
 }
 
-static int on_time_ms(int freq)
+static int on_time_ms(double freq)
 {
     int p = period_ms(freq);
-    int on = (p * LED1_DUTY_PERCENT) / 100;
+    int on = (int)((p * LED1_DUTY_PERCENT) / 100.0);
 
     if (on < 1) on = 1;
     return on;
 }
 
-static int off_time_ms(int freq)
+static int off_time_ms(double freq)
 {
     int p = period_ms(freq);
     int off = p - on_time_ms(freq);
@@ -150,7 +150,7 @@ struct app_object {
 
     int16_t adc_raw;
     int32_t adc_mv;
-    int led1_freq_hz;
+    double led1_freq_hz;
 };
 
 static struct app_object s_obj;
@@ -204,7 +204,7 @@ static int init_app_object(struct app_object *s)
 
     s->adc_raw = 0;
     s->adc_mv = 0;
-    s->led1_freq_hz = LED1_MIN_HZ;
+    s->led1_freq_hz = (double)LED1_MIN_HZ;
 
     return 0;
 }
@@ -235,8 +235,14 @@ static void start_led1_timers(struct app_object *s)
     k_timer_start(&led1_blink_timer, K_MSEC(on_ms), K_NO_WAIT);
     k_timer_start(&led1_done_timer, K_MSEC(LED1_ACTIVE_DURATION_MS), K_NO_WAIT);
 
-    LOG_INF("LED1 blinking for %d ms at %d Hz (on=%d ms, off=%d ms)",
-            LED1_ACTIVE_DURATION_MS, s->led1_freq_hz, on_ms, off_ms);
+    int freq_mhz = (int)(s->led1_freq_hz * 1000.0);
+
+    LOG_INF("LED1 blinking for %d ms at %d.%03d Hz (on=%d ms, off=%d ms)",
+            LED1_ACTIVE_DURATION_MS,
+            freq_mhz / 1000,
+            freq_mhz % 1000,
+            on_ms,
+            off_ms);
 }
 
 static enum smf_state_result init_run(void *o)
@@ -338,9 +344,6 @@ static void single_sample_entry(void *o)
         smf_set_state(SMF_CTX(s), &app_states[STATE_ERROR]);
         return;
     }
-
-    LOG_INF("ADC raw=%d, mv=%d, freq=%d Hz",
-            s->adc_raw, s->adc_mv, s->led1_freq_hz);
 
     smf_set_state(SMF_CTX(s), &app_states[STATE_LED1_ACTIVE]);
 }
@@ -490,8 +493,13 @@ static int do_single_sample(struct app_object *s)
     s->adc_mv = val_mv;
     s->led1_freq_hz = map_mv_to_freq(s->adc_mv);
 
-    LOG_INF("ADC raw=%d, mv=%d, freq=%d Hz",
-        s->adc_raw, s->adc_mv, s->led1_freq_hz);
+    int freq_mhz = (int)(s->led1_freq_hz * 1000.0);
+
+    LOG_INF("ADC raw=%d, mv=%d, freq=%d.%03d Hz",
+            s->adc_raw,
+            s->adc_mv,
+            freq_mhz / 1000,
+            freq_mhz % 1000);
 
     return 0;
 }
