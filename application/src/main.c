@@ -4,27 +4,32 @@
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/atomic.h>
-#include <zephyr/smf.h> // CONFIG_SMF=y
-
-// #include <zephyr/drivers/adc.h> // CONFIG_ADC=y
+#include <zephyr/smf.h> 
+#include <zephyr/drivers/adc.h> 
 // #include <zephyr/drivers/pwm.h> // CONFIG_PWM=y
 // #include "ble-lib.h" // BME554 BLE library (remember to add to CMakeLists.txt)
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
+#define ADC_DT_SPEC_GET_BY_ALIAS(adc_alias)                    \
+{                                                             \
+    .dev = DEVICE_DT_GET(DT_PARENT(DT_ALIAS(adc_alias))),      \
+    .channel_id = DT_REG_ADDR(DT_ALIAS(adc_alias)),            \
+    ADC_CHANNEL_CFG_FROM_DT_NODE(DT_ALIAS(adc_alias))          \
+}
 
 /* macros */
-#define LED_BLINK_FREQ_HZ 2
-#define FREQ_UP_INC_HZ 1
-#define FREQ_DOWN_INC_HZ 1
-
-#define ACTION_FREQ_MIN_HZ 1
-#define ACTION_FREQ_MAX_HZ 5
-
 #define HEARTBEAT_ON_MS 250
 #define HEARTBEAT_OFF_MS 750
 
 #define HEARTBEAT_STACK_SIZE 1024
 #define HEARTBEAT_THREAD_PRIO 5
+
+#define LED1_MIN_HZ 1
+#define LED1_MAX_HZ 5
+#define ADC_MAX_MV 3000
+
+#define LED1_DUTY_PERCENT 10
+#define LED1_ACTIVE_DURATION_MS 5000
 
 extern void heartbeat_thread(void *, void *, void *);
 
@@ -36,48 +41,22 @@ K_THREAD_DEFINE(heartbeat_thread_id,
                 HEARTBEAT_THREAD_PRIO, 0, 0);
 
 /* button events (main-facing) */
-#define BTN_SLEEP_EVENT         BIT(0)
+#define BTN_SINGLE_SAMPLE_EVENT BIT(0)
 #define BTN_RESET_EVENT         BIT(1)
-#define BTN_FREQ_UP_EVENT       BIT(2)
-#define BTN_FREQ_DOWN_EVENT     BIT(3)
+#define BTN_EVENT_MASK          (BTN_SINGLE_SAMPLE_EVENT | BTN_RESET_EVENT)
 
-/* double press events (main-facing) */
-#define BTN_FREQ_UP_DBL_EVENT   BIT(4)
-#define BTN_FREQ_DOWN_DBL_EVENT BIT(5)
-
-#define BTN_EVENT_MASK (BTN_SLEEP_EVENT | BTN_RESET_EVENT | \
-                        BTN_FREQ_UP_EVENT | BTN_FREQ_DOWN_EVENT | \
-                        BTN_FREQ_UP_DBL_EVENT | BTN_FREQ_DOWN_DBL_EVENT)
+#define LED1_TIMER_EVENT        BIT(2)
+#define LED1_DONE_EVENT         BIT(3)
 
 K_EVENT_DEFINE(button_events);
 
-/* raw freq-only events (ISR -> doublepress thread) */
-#define RAW_FREQ_UP_EVENT   BIT(0)
-#define RAW_FREQ_DOWN_EVENT BIT(1)
-#define RAW_FREQ_MASK (RAW_FREQ_UP_EVENT | RAW_FREQ_DOWN_EVENT)
+void led1_blink_timer_handler(struct k_timer *t);
+void led1_blink_timer_stop(struct k_timer *t);
+void led1_done_timer_handler(struct k_timer *t);
+void led1_done_timer_stop(struct k_timer *t);
 
-K_EVENT_DEFINE(raw_freq_events);
-
-/* double press config */
-#define DOUBLE_PRESS_WINDOW_MS 500
-
-#define DBLP_STACK_SIZE 1024
-#define DBLP_THREAD_PRIO 5
-
-extern void doublepress_thread(void *, void *, void *);
-
-/* doublepress thread */
-K_THREAD_DEFINE(doublepress_thread_id,
-                DBLP_STACK_SIZE,
-                doublepress_thread,
-                NULL, NULL, NULL,
-                DBLP_THREAD_PRIO, 0, 0);
-
-/* timer prototypes */
-void action_timer_handler(struct k_timer *t);
-void action_timer_stop(struct k_timer *t);
-
-K_TIMER_DEFINE(action_timer, action_timer_handler, action_timer_stop);
+K_TIMER_DEFINE(led1_blink_timer, led1_blink_timer_handler, led1_blink_timer_stop);
+K_TIMER_DEFINE(led1_done_timer, led1_done_timer_handler, led1_done_timer_stop);
 
 /* helper timing functions */
 
@@ -87,9 +66,42 @@ static inline uint64_t now_ns(void)
     return k_ticks_to_ns_near64(ticks);
 }
 
-static inline int32_t action_half_period_ms(int freq_hz)
+static int clamp_mv(int32_t mv)
 {
-    return 1000 / (2 * freq_hz);
+    if (mv < 0) return 0;
+    if (mv > ADC_MAX_MV) return ADC_MAX_MV;
+    return mv;
+}
+
+static double map_mv_to_freq(int32_t mv)
+{
+    double mv_clamped = (double)clamp_mv(mv);
+
+    return (double)LED1_MIN_HZ +
+           mv_clamped * ((double)(LED1_MAX_HZ - LED1_MIN_HZ)) / (double)ADC_MAX_MV;
+}
+
+static int period_ms(double freq)
+{
+    return (int)(1000.0 / freq);
+}
+
+static int on_time_ms(double freq)
+{
+    int p = period_ms(freq);
+    int on = (int)((p * LED1_DUTY_PERCENT) / 100.0);
+
+    if (on < 1) on = 1;
+    return on;
+}
+
+static int off_time_ms(double freq)
+{
+    int p = period_ms(freq);
+    int off = p - on_time_ms(freq);
+
+    if (off < 1) off = 1;
+    return off;
 }
 
 /* hardware definitions */
@@ -100,9 +112,6 @@ static const struct gpio_dt_spec heartbeat_led =
 static const struct gpio_dt_spec iv_pump_led =
     GPIO_DT_SPEC_GET(DT_ALIAS(ivpump), gpios);
 
-static const struct gpio_dt_spec buzzer_led =
-    GPIO_DT_SPEC_GET(DT_ALIAS(buzzer), gpios);
-
 static const struct gpio_dt_spec error_led =
     GPIO_DT_SPEC_GET(DT_ALIAS(error), gpios);
 
@@ -112,49 +121,36 @@ static const struct gpio_dt_spec sleep_button =
 static const struct gpio_dt_spec reset_button =
     GPIO_DT_SPEC_GET(DT_ALIAS(resetbutton), gpios);
 
-static const struct gpio_dt_spec freq_up_button =
-    GPIO_DT_SPEC_GET(DT_ALIAS(frequpbutton), gpios);
-
-static const struct gpio_dt_spec freq_down_button =
-    GPIO_DT_SPEC_GET(DT_ALIAS(freqdownbutton), gpios);
-
 /* callback prototypes */
 void sleep_button_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins);
 void reset_button_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins);
-void freq_up_button_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins);
-void freq_down_button_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins);
 
 /* callback structs */
 static struct gpio_callback sleep_button_cb;
 static struct gpio_callback reset_button_cb;
-static struct gpio_callback freq_up_button_cb;
-static struct gpio_callback freq_down_button_cb;
+static const struct adc_dt_spec adc_single = ADC_DT_SPEC_GET_BY_ALIAS(vadc_single);
 
 /* SMF state machine */
 enum app_state {
     STATE_INIT,
-    STATE_DEFAULTS,
-    STATE_AWAKE,
-    STATE_SLEEP,
+    STATE_IDLE,
+    STATE_SINGLE_SAMPLE,
+    STATE_LED1_ACTIVE,
     STATE_ERROR,
 };
 
 struct app_object {
     struct smf_ctx ctx;   /* must be first */
 
-    int action_freq_hz;
-    int stored_action_freq_hz;
-
-    bool action_phase;
-    bool stored_action_phase;
-
-    int32_t stored_action_remaining_ms;
-
     uint64_t hb_last_ns;
-    uint64_t action_last_ns;
+    uint64_t led1_last_ns;
 
-    bool wake_from_sleep;
-    bool threads_started;
+    bool adc_ready;
+    bool led1_is_on;
+
+    int16_t adc_raw;
+    int32_t adc_mv;
+    double led1_freq_hz;
 };
 
 static struct app_object s_obj;
@@ -162,24 +158,37 @@ static const struct smf_state app_states[];
 
 /* SMF helper prototypes */
 static int init_app_object(struct app_object *s);
-static void set_action_outputs_from_phase(bool phase);
-static void clear_action_outputs(void);
-static void enable_awake_buttons(void);
-static void disable_awake_buttons(void);
-static void start_action_timer_for_freq(struct app_object *s);
-static void restore_action_timer_after_sleep(struct app_object *s);
+static void set_led1(bool on);
+static void enable_single_sample_button(void);
+static void disable_single_sample_button(void);
+static void start_led1_timers(struct app_object *s);
+static int do_single_sample(struct app_object *s);
+
+static int setup_adc_single(void)
+{
+    int err;
+
+    if (!device_is_ready(adc_single.dev)) {
+        LOG_ERR("ADC device not ready");
+        return -ENODEV;
+    }
+
+    err = adc_channel_setup_dt(&adc_single);
+    if (err < 0) {
+        LOG_ERR("ADC channel setup failed (%d)", err);
+        return err;
+    }
+
+    return 0;
+}
 
 /* SMF state handlers */
-static enum smf_state_result init_run(void *o);
-static void defaults_entry(void *o);
-static enum smf_state_result defaults_run(void *o);
-static void awake_entry(void *o);
-static enum smf_state_result awake_run(void *o);
-static void sleep_entry(void *o);
-static enum smf_state_result sleep_run(void *o);
-static void error_entry(void *o);
-static enum smf_state_result error_run(void *o);
-static void error_exit(void *o);
+static void idle_entry(void *o);
+static enum smf_state_result idle_run(void *o);
+static void single_sample_entry(void *o);
+static enum smf_state_result single_sample_run(void *o);
+static void led1_active_entry(void *o);
+static enum smf_state_result led1_active_run(void *o);
 
 static int init_app_object(struct app_object *s)
 {
@@ -187,88 +196,68 @@ static int init_app_object(struct app_object *s)
         return -1;
     }
 
-    s->action_freq_hz = LED_BLINK_FREQ_HZ;
-    s->stored_action_freq_hz = LED_BLINK_FREQ_HZ;
-    s->action_phase = false;
-    s->stored_action_phase = false;
-    s->stored_action_remaining_ms = 0;
     s->hb_last_ns = 0;
-    s->action_last_ns = 0;
-    s->wake_from_sleep = false;
-    s->threads_started = false;
+    s->led1_last_ns = 0;
+
+    s->adc_ready = false;
+    s->led1_is_on = false;
+
+    s->adc_raw = 0;
+    s->adc_mv = 0;
+    s->led1_freq_hz = (double)LED1_MIN_HZ;
 
     return 0;
 }
 
-static void set_action_outputs_from_phase(bool phase)
+static void set_led1(bool on)
 {
-    gpio_pin_set_dt(&iv_pump_led, phase ? 0 : 1);
-    gpio_pin_set_dt(&buzzer_led, phase ? 1 : 0);
+    gpio_pin_set_dt(&iv_pump_led, on ? 1 : 0);
 }
 
-static void clear_action_outputs(void)
-{
-    gpio_pin_set_dt(&iv_pump_led, 0);
-    gpio_pin_set_dt(&buzzer_led, 0);
-}
-
-static void enable_awake_buttons(void)
+static void enable_single_sample_button(void)
 {
     gpio_pin_interrupt_configure_dt(&sleep_button, GPIO_INT_EDGE_TO_ACTIVE);
-    gpio_pin_interrupt_configure_dt(&freq_up_button, GPIO_INT_EDGE_TO_ACTIVE);
-    gpio_pin_interrupt_configure_dt(&freq_down_button, GPIO_INT_EDGE_TO_ACTIVE);
 }
 
-static void disable_awake_buttons(void)
+static void disable_single_sample_button(void)
 {
     gpio_pin_interrupt_configure_dt(&sleep_button, GPIO_INT_DISABLE);
-    gpio_pin_interrupt_configure_dt(&freq_up_button, GPIO_INT_DISABLE);
-    gpio_pin_interrupt_configure_dt(&freq_down_button, GPIO_INT_DISABLE);
 }
 
-static void start_action_timer_for_freq(struct app_object *s)
+static void start_led1_timers(struct app_object *s)
 {
-    int32_t hp = action_half_period_ms(s->action_freq_hz);
-    k_timer_stop(&action_timer);
-    k_timer_start(&action_timer, K_MSEC(hp), K_MSEC(hp));
-    s->action_last_ns = 0;
+    int on_ms = on_time_ms(s->led1_freq_hz);
+    int off_ms = off_time_ms(s->led1_freq_hz);
+
+    s->led1_is_on = true;
+    set_led1(true);
+
+    k_timer_start(&led1_blink_timer, K_MSEC(on_ms), K_NO_WAIT);
+    k_timer_start(&led1_done_timer, K_MSEC(LED1_ACTIVE_DURATION_MS), K_NO_WAIT);
+
+    int freq_mhz = (int)(s->led1_freq_hz * 1000.0);
+
+    LOG_INF("LED1 blinking for %d ms at %d.%03d Hz (on=%d ms, off=%d ms)",
+            LED1_ACTIVE_DURATION_MS,
+            freq_mhz / 1000,
+            freq_mhz % 1000,
+            on_ms,
+            off_ms);
 }
 
-static void restore_action_timer_after_sleep(struct app_object *s)
+static enum smf_state_result init_run(void *o)
 {
-    int32_t hp = action_half_period_ms(s->action_freq_hz);
-    int32_t first_ms = s->stored_action_remaining_ms;
-
-    if (first_ms <= 0 || first_ms > hp) {
-        first_ms = hp;
-    }
-
-    set_action_outputs_from_phase(s->action_phase);
-    k_timer_start(&action_timer, K_MSEC(first_ms), K_MSEC(hp));
-    s->action_last_ns = 0;
-
-    LOG_INF("Exited SLEEP (freq=%d, phase=%d, first=%d ms, hp=%d ms) @ %llu ns",
-            s->action_freq_hz, s->action_phase, first_ms, hp, now_ns());
-}
-
-static enum smf_state_result init_run(void *o){
     struct app_object *s = (struct app_object *)o;
     int err;
 
     if (!device_is_ready(sleep_button.port)) {
         LOG_ERR("gpio0 interface not ready.");
         smf_set_terminate(SMF_CTX(s), -1);
-        return SMF_EVENT_HANDLED;;
+        return SMF_EVENT_HANDLED;
     }
 
     err = gpio_pin_configure_dt(&sleep_button, GPIO_INPUT);
     if (err < 0) { LOG_ERR("Cannot configure sleep button."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
-
-    err = gpio_pin_configure_dt(&freq_up_button, GPIO_INPUT);
-    if (err < 0) { LOG_ERR("Cannot configure freq_up button."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
-
-    err = gpio_pin_configure_dt(&freq_down_button, GPIO_INPUT);
-    if (err < 0) { LOG_ERR("Cannot configure freq_down button."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
 
     err = gpio_pin_configure_dt(&reset_button, GPIO_INPUT);
     if (err < 0) { LOG_ERR("Cannot configure reset button."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
@@ -277,22 +266,13 @@ static enum smf_state_result init_run(void *o){
     if (err < 0) { LOG_ERR("Cannot configure heartbeat LED."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
 
     err = gpio_pin_configure_dt(&iv_pump_led, GPIO_OUTPUT_INACTIVE);
-    if (err < 0) { LOG_ERR("Cannot configure iv_pump LED."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
-
-    err = gpio_pin_configure_dt(&buzzer_led, GPIO_OUTPUT_INACTIVE);
-    if (err < 0) { LOG_ERR("Cannot configure buzzer LED."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
+    if (err < 0) { LOG_ERR("Cannot configure LED1."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
 
     err = gpio_pin_configure_dt(&error_led, GPIO_OUTPUT_INACTIVE);
     if (err < 0) { LOG_ERR("Cannot configure error LED."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
 
     err = gpio_pin_interrupt_configure_dt(&sleep_button, GPIO_INT_EDGE_TO_ACTIVE);
     if (err < 0) { LOG_ERR("Cannot attach callback to sw0."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
-
-    err = gpio_pin_interrupt_configure_dt(&freq_up_button, GPIO_INT_EDGE_TO_ACTIVE);
-    if (err < 0) { LOG_ERR("Cannot attach callback to sw1."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
-
-    err = gpio_pin_interrupt_configure_dt(&freq_down_button, GPIO_INT_EDGE_TO_ACTIVE);
-    if (err < 0) { LOG_ERR("Cannot attach callback to sw2."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
 
     err = gpio_pin_interrupt_configure_dt(&reset_button, GPIO_INT_EDGE_TO_ACTIVE);
     if (err < 0) { LOG_ERR("Cannot attach callback to sw3."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
@@ -305,147 +285,119 @@ static enum smf_state_result init_run(void *o){
     err = gpio_add_callback_dt(&reset_button, &reset_button_cb);
     if (err < 0) { LOG_ERR("Cannot add reset button callback."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
 
-    gpio_init_callback(&freq_up_button_cb, freq_up_button_callback, BIT(freq_up_button.pin));
-    err = gpio_add_callback_dt(&freq_up_button, &freq_up_button_cb);
-    if (err < 0) { LOG_ERR("Cannot add freq_up button callback."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
+    k_event_clear(&button_events, BTN_EVENT_MASK | LED1_TIMER_EVENT | LED1_DONE_EVENT);
 
-    gpio_init_callback(&freq_down_button_cb, freq_down_button_callback, BIT(freq_down_button.pin));
-    err = gpio_add_callback_dt(&freq_down_button, &freq_down_button_cb);
-    if (err < 0) { LOG_ERR("Cannot add freq_down button callback."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
+    k_thread_name_set(heartbeat_thread_id, "heartbeat");
 
-    k_event_clear(&button_events, BTN_EVENT_MASK);
-    k_event_clear(&raw_freq_events, RAW_FREQ_MASK);
-
-    k_timer_user_data_set(&action_timer, s);
-
-    if (!s->threads_started) {
-        k_thread_name_set(heartbeat_thread_id, "heartbeat");
-        k_thread_name_set(doublepress_thread_id, "doublepress");
-        k_thread_start(heartbeat_thread_id);
-        k_thread_start(doublepress_thread_id);
-        s->threads_started = true;
+    err = setup_adc_single();
+    if (err < 0) {
+        smf_set_state(SMF_CTX(s), &app_states[STATE_ERROR]);
+        return SMF_EVENT_HANDLED;
     }
 
-    smf_set_state(SMF_CTX(s), &app_states[STATE_DEFAULTS]);
+    s->adc_ready = true;
+
+    smf_set_state(SMF_CTX(s), &app_states[STATE_IDLE]);
     return SMF_EVENT_HANDLED;
 }
 
-static void defaults_entry(void *o)
+static void idle_entry(void *o)
 {
-    struct app_object *s = (struct app_object *)o;
-
-    s->action_freq_hz = LED_BLINK_FREQ_HZ;
-    s->action_phase = false;
-    s->stored_action_freq_hz = s->action_freq_hz;
-    s->stored_action_phase = s->action_phase;
-    s->stored_action_remaining_ms = 0;
-    s->wake_from_sleep = false;
+    ARG_UNUSED(o);
 
     gpio_pin_set_dt(&error_led, 0);
-    enable_awake_buttons();
-    set_action_outputs_from_phase(s->action_phase);
-    start_action_timer_for_freq(s);
+    set_led1(false);
+    enable_single_sample_button();
 
-    LOG_INF("DEFAULTS: action_freq=%d Hz, phase=%d @ %llu ns",
-            s->action_freq_hz, s->action_phase, now_ns());
+    LOG_INF("IDLE");
 }
 
-static enum smf_state_result defaults_run(void *o)
-{
-    struct app_object *s = (struct app_object *)o;
-    smf_set_state(SMF_CTX(s), &app_states[STATE_AWAKE]);
-    return SMF_EVENT_HANDLED;
-}
-
-static void awake_entry(void *o)
-{
-    struct app_object *s = (struct app_object *)o;
-
-    gpio_pin_set_dt(&error_led, 0);
-    enable_awake_buttons();
-
-    if (s->wake_from_sleep) {
-        s->wake_from_sleep = false;
-        s->action_freq_hz = s->stored_action_freq_hz;
-        s->action_phase = s->stored_action_phase;
-        restore_action_timer_after_sleep(s);
-    }
-}
-
-static enum smf_state_result awake_run(void *o)
+static enum smf_state_result idle_run(void *o)
 {
     struct app_object *s = (struct app_object *)o;
     uint32_t events = k_event_wait(&button_events, BTN_EVENT_MASK, true, K_FOREVER);
-    int delta = 0;
 
     LOG_INF("Button Event Posted: %u", events);
 
     if (events & BTN_RESET_EVENT) {
-        smf_set_state(SMF_CTX(s), &app_states[STATE_DEFAULTS]);
-        return SMF_EVENT_HANDLED;;
+        smf_set_state(SMF_CTX(s), &app_states[STATE_IDLE]);
+        return SMF_EVENT_HANDLED;
     }
 
-    if (events & BTN_SLEEP_EVENT) {
-        smf_set_state(SMF_CTX(s), &app_states[STATE_SLEEP]);
-        return SMF_EVENT_HANDLED;;
+    if (events & BTN_SINGLE_SAMPLE_EVENT) {
+        smf_set_state(SMF_CTX(s), &app_states[STATE_SINGLE_SAMPLE]);
+        return SMF_EVENT_HANDLED;
     }
 
-    if (events & BTN_FREQ_UP_DBL_EVENT)   { delta += (2 * FREQ_UP_INC_HZ); }
-    if (events & BTN_FREQ_DOWN_DBL_EVENT) { delta -= (2 * FREQ_DOWN_INC_HZ); }
-    if (events & BTN_FREQ_UP_EVENT)       { delta += FREQ_UP_INC_HZ; }
-    if (events & BTN_FREQ_DOWN_EVENT)     { delta -= FREQ_DOWN_INC_HZ; }
-
-    if (delta != 0) {
-        s->action_freq_hz += delta;
-        LOG_INF("FREQ delta %d -> %d Hz @ %llu ns", delta, s->action_freq_hz, now_ns());
-    }
-
-    if (s->action_freq_hz < ACTION_FREQ_MIN_HZ || s->action_freq_hz > ACTION_FREQ_MAX_HZ) {
-        smf_set_state(SMF_CTX(s), &app_states[STATE_ERROR]);
-        return SMF_EVENT_HANDLED;;
-    }
-
-    if (delta != 0) {
-        start_action_timer_for_freq(s);
-    }
     return SMF_EVENT_HANDLED;
 }
 
-static void sleep_entry(void *o)
+static void single_sample_entry(void *o)
 {
     struct app_object *s = (struct app_object *)o;
+    int ret;
 
-    s->stored_action_freq_hz = s->action_freq_hz;
-    s->stored_action_phase = s->action_phase;
-    s->stored_action_remaining_ms = k_timer_remaining_get(&action_timer);
-    s->wake_from_sleep = false;
+    disable_single_sample_button();
 
-    k_timer_stop(&action_timer);
-    clear_action_outputs();
+    ret = do_single_sample(s);
+    if (ret < 0) {
+        smf_set_state(SMF_CTX(s), &app_states[STATE_ERROR]);
+        return;
+    }
 
-    LOG_INF("Entered SLEEP (stored freq=%d, phase=%d, rem=%d ms) @ %llu ns",
-            s->stored_action_freq_hz, s->stored_action_phase,
-            s->stored_action_remaining_ms, now_ns());
+    smf_set_state(SMF_CTX(s), &app_states[STATE_LED1_ACTIVE]);
 }
 
-static enum smf_state_result sleep_run(void *o)
+static enum smf_state_result single_sample_run(void *o)
+{
+    ARG_UNUSED(o);
+    return SMF_EVENT_HANDLED;
+}
+
+static void led1_active_entry(void *o)
+{
+    struct app_object *s = (struct app_object *)o;
+    start_led1_timers(s);
+}
+
+static enum smf_state_result led1_active_run(void *o)
 {
     struct app_object *s = (struct app_object *)o;
     uint32_t events = k_event_wait(&button_events,
-                                   BTN_SLEEP_EVENT | BTN_RESET_EVENT,
+                                   BTN_RESET_EVENT | LED1_TIMER_EVENT | LED1_DONE_EVENT,
                                    true,
                                    K_FOREVER);
 
-    LOG_INF("Button Event Posted: %u", events);
-
     if (events & BTN_RESET_EVENT) {
-        s->wake_from_sleep = false;
-        smf_set_state(SMF_CTX(s), &app_states[STATE_DEFAULTS]);
-        return SMF_EVENT_HANDLED;;
+        k_timer_stop(&led1_blink_timer);
+        k_timer_stop(&led1_done_timer);
+        set_led1(false);
+        smf_set_state(SMF_CTX(s), &app_states[STATE_IDLE]);
+        return SMF_EVENT_HANDLED;
     }
 
-    s->wake_from_sleep = true;
-    smf_set_state(SMF_CTX(s), &app_states[STATE_AWAKE]);
+    if (events & LED1_TIMER_EVENT) {
+        int next_ms;
+
+        s->led1_is_on = !s->led1_is_on;
+        set_led1(s->led1_is_on);
+
+        if (s->led1_is_on) {
+            next_ms = on_time_ms(s->led1_freq_hz);
+        } else {
+            next_ms = off_time_ms(s->led1_freq_hz);
+        }
+
+        k_timer_start(&led1_blink_timer, K_MSEC(next_ms), K_NO_WAIT);
+    }
+
+    if (events & LED1_DONE_EVENT) {
+        k_timer_stop(&led1_blink_timer);
+        set_led1(false);
+        smf_set_state(SMF_CTX(s), &app_states[STATE_IDLE]);
+        return SMF_EVENT_HANDLED;
+    }
+
     return SMF_EVENT_HANDLED;
 }
 
@@ -453,13 +405,15 @@ static void error_entry(void *o)
 {
     struct app_object *s = (struct app_object *)o;
 
-    k_timer_stop(&action_timer);
-    clear_action_outputs();
-    gpio_pin_set_dt(&error_led, 1);
-    disable_awake_buttons();
+    ARG_UNUSED(s);
 
-    LOG_ERR("ERROR: action_freq out of range (%d Hz) @ %llu ns",
-            s->action_freq_hz, now_ns());
+    k_timer_stop(&led1_blink_timer);
+    k_timer_stop(&led1_done_timer);
+    set_led1(false);
+    disable_single_sample_button();
+    gpio_pin_set_dt(&error_led, 1);
+
+    LOG_ERR("Entered ERROR state");
 }
 
 static enum smf_state_result error_run(void *o)
@@ -468,7 +422,7 @@ static enum smf_state_result error_run(void *o)
     uint32_t events = k_event_wait(&button_events, BTN_RESET_EVENT, true, K_FOREVER);
 
     LOG_INF("Button Event Posted: %u", events);
-    smf_set_state(SMF_CTX(s), &app_states[STATE_DEFAULTS]);
+    smf_set_state(SMF_CTX(s), &app_states[STATE_IDLE]);
     return SMF_EVENT_HANDLED;
 }
 
@@ -479,11 +433,11 @@ static void error_exit(void *o)
 }
 
 static const struct smf_state app_states[] = {
-    [STATE_INIT]     = SMF_CREATE_STATE(NULL,           init_run,     NULL, NULL, NULL),
-    [STATE_DEFAULTS] = SMF_CREATE_STATE(defaults_entry, defaults_run, NULL, NULL, NULL),
-    [STATE_AWAKE]    = SMF_CREATE_STATE(awake_entry,    awake_run,    NULL, NULL, NULL),
-    [STATE_SLEEP]    = SMF_CREATE_STATE(sleep_entry,    sleep_run,    NULL, NULL, NULL),
-    [STATE_ERROR]    = SMF_CREATE_STATE(error_entry,    error_run,    error_exit, NULL, NULL),
+    [STATE_INIT]          = SMF_CREATE_STATE(NULL,              init_run,            NULL, NULL, NULL),
+    [STATE_IDLE]          = SMF_CREATE_STATE(idle_entry,        idle_run,            NULL, NULL, NULL),
+    [STATE_SINGLE_SAMPLE] = SMF_CREATE_STATE(single_sample_entry, single_sample_run, NULL, NULL, NULL),
+    [STATE_LED1_ACTIVE]   = SMF_CREATE_STATE(led1_active_entry, led1_active_run,     NULL, NULL, NULL),
+    [STATE_ERROR]         = SMF_CREATE_STATE(error_entry,       error_run,           error_exit, NULL, NULL),
 };
 
 int main(void)
@@ -508,53 +462,88 @@ int main(void)
     return ret;
 }
 
-/* timer handlers */
-
-void action_timer_handler(struct k_timer *t)
+static int do_single_sample(struct app_object *s)
 {
-    struct app_object *s = (struct app_object *)k_timer_user_data_get(t);
-    uint64_t now = now_ns();
+    int ret;
+    int16_t buf = 0;
+    int32_t val_mv = 0;
 
-    if (s == NULL) {
-        return;
+    struct adc_sequence sequence = {
+        .buffer = &buf,
+        .buffer_size = sizeof(buf),
+    };
+
+    (void)adc_sequence_init_dt(&adc_single, &sequence);
+
+    ret = adc_read(adc_single.dev, &sequence);
+    if (ret < 0) {
+        LOG_ERR("ADC read failed (%d)", ret);
+        return ret;
     }
 
-    if (s->action_last_ns != 0U) {
-        LOG_INF("action toggle period (ns): %llu",
-                (unsigned long long)(now - s->action_last_ns));
-    }
-    s->action_last_ns = now;
+    s->adc_raw = buf;
+    val_mv = buf;
 
-    s->action_phase = !s->action_phase;
-    set_action_outputs_from_phase(s->action_phase);
+    ret = adc_raw_to_millivolts_dt(&adc_single, &val_mv);
+    if (ret < 0) {
+        LOG_ERR("ADC conversion to mV failed");
+        return ret;
+    }
+
+    s->adc_mv = val_mv;
+    s->led1_freq_hz = map_mv_to_freq(s->adc_mv);
+
+    int freq_mhz = (int)(s->led1_freq_hz * 1000.0);
+
+    LOG_INF("ADC raw=%d, mv=%d, freq=%d.%03d Hz",
+            s->adc_raw,
+            s->adc_mv,
+            freq_mhz / 1000,
+            freq_mhz % 1000);
+
+    return 0;
 }
 
-void action_timer_stop(struct k_timer *t)
+/* timer handlers */
+
+void led1_blink_timer_handler(struct k_timer *t)
 {
     ARG_UNUSED(t);
-    clear_action_outputs();
+    k_event_post(&button_events, LED1_TIMER_EVENT);
+}
+
+void led1_blink_timer_stop(struct k_timer *t)
+{
+    ARG_UNUSED(t);
+}
+
+void led1_done_timer_handler(struct k_timer *t)
+{
+    ARG_UNUSED(t);
+    k_event_post(&button_events, LED1_DONE_EVENT);
+}
+
+void led1_done_timer_stop(struct k_timer *t)
+{
+    ARG_UNUSED(t);
 }
 
 /* GPIO callbacks */
 
 void sleep_button_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
 {
-    k_event_post(&button_events, BTN_SLEEP_EVENT);
+    ARG_UNUSED(dev);
+    ARG_UNUSED(cb);
+    ARG_UNUSED(pins);
+    k_event_post(&button_events, BTN_SINGLE_SAMPLE_EVENT);
 }
 
 void reset_button_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
 {
+    ARG_UNUSED(dev);
+    ARG_UNUSED(cb);
+    ARG_UNUSED(pins);
     k_event_post(&button_events, BTN_RESET_EVENT);
-}
-
-void freq_up_button_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
-{
-    k_event_post(&raw_freq_events, RAW_FREQ_UP_EVENT);
-}
-
-void freq_down_button_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
-{
-    k_event_post(&raw_freq_events, RAW_FREQ_DOWN_EVENT);
 }
 
 /* threads */
@@ -585,71 +574,5 @@ void heartbeat_thread(void *, void *, void *)
                     (unsigned long long)(now - s_obj.hb_last_ns));
         }
         s_obj.hb_last_ns = now;
-    }
-}
-
-void doublepress_thread(void *, void *, void *)
-{
-    uint32_t pending = 0;
-
-    while (1) {
-        uint32_t first = pending;
-        pending = 0;
-
-        if (first == 0) {
-            first = k_event_wait(&raw_freq_events, RAW_FREQ_MASK, true, K_FOREVER);
-
-            /* If both events arrived together, treat DOWN as pending */
-            if ((first & RAW_FREQ_UP_EVENT) && (first & RAW_FREQ_DOWN_EVENT)) {
-                pending = RAW_FREQ_DOWN_EVENT;
-                first = RAW_FREQ_UP_EVENT;
-            }
-            else if (first & RAW_FREQ_UP_EVENT) {
-                first = RAW_FREQ_UP_EVENT;
-            }
-            else if (first & RAW_FREQ_DOWN_EVENT) {
-                first = RAW_FREQ_DOWN_EVENT;
-            }
-            else {
-                continue;
-            }
-        }
-
-        uint32_t second = k_event_wait(&raw_freq_events,
-                                       RAW_FREQ_MASK,
-                                       true,
-                                       K_MSEC(DOUBLE_PRESS_WINDOW_MS));
-
-        if (second == 0) {
-            if (first == RAW_FREQ_UP_EVENT) {
-                k_event_post(&button_events, BTN_FREQ_UP_EVENT);
-            } else {
-                k_event_post(&button_events, BTN_FREQ_DOWN_EVENT);
-            }
-            continue;
-        }
-
-        if (second & RAW_FREQ_UP_EVENT) {
-            second = RAW_FREQ_UP_EVENT;
-        } else if (second & RAW_FREQ_DOWN_EVENT) {
-            second = RAW_FREQ_DOWN_EVENT;
-        } else {
-            continue;
-        }
-
-        if (second == first) {
-            if (first == RAW_FREQ_UP_EVENT) {
-                k_event_post(&button_events, BTN_FREQ_UP_DBL_EVENT);
-            } else {
-                k_event_post(&button_events, BTN_FREQ_DOWN_DBL_EVENT);
-            }
-        } else {
-            if (first == RAW_FREQ_UP_EVENT) {
-                k_event_post(&button_events, BTN_FREQ_UP_EVENT);
-            } else {
-                k_event_post(&button_events, BTN_FREQ_DOWN_EVENT);
-            }
-            pending = second;
-        }
     }
 }

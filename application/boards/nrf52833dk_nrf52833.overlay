@@ -1,13 +1,45 @@
 / {
+	zephyr,user {
+		io-channels = <&adc 0>, <&adc 1>;
+	};
+
 	aliases {
-        // add your aliases here; examples:
-        heartbeat = &led0;  // this corresponds to LED1 on the board
-        ivpump = &led1;
+        heartbeat = &led0;      // LED0 in code, LED1 on board
+        ivpump = &led1;         // use as LED1 output for single-sample stage
         buzzer = &led2;
         error = &led3;
-        sleepbutton = &button0;  // this corresponds to SW1 on the board
-        frequpbutton = &button1;
+
+        sleepbutton = &button0; // use as BUTTON0 trigger
+        frequpbutton = &button1; // use as BUTTON1 trigger
         freqdownbutton = &button2;
         resetbutton = &button3;
+
+        vadc-single = &vadc_single;
+        vadc-diff = &vadc_diff;
+	};
+};
+
+&adc {
+	#address-cells = <1>;
+	#size-cells = <0>;
+	status = "okay";
+
+	vadc_single: channel@0 {
+		reg = <0>;
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,gain = "ADC_GAIN_1_5";
+		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+		zephyr,input-positive = <NRF_SAADC_AIN0>;
+		zephyr,resolution = <12>;
+	};
+
+	vadc_diff: channel@1 {
+		reg = <1>;
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,gain = "ADC_GAIN_1_5";
+		zephyr,acquisition-time = <ADC_ACQ_TIME(ADC_ACQ_TIME_MICROSECONDS, 40)>;
+		zephyr,input-positive = <NRF_SAADC_AIN1>;
+		zephyr,input-negative = <NRF_SAADC_AIN2>;
+		zephyr,resolution = <12>;
 	};
 };
