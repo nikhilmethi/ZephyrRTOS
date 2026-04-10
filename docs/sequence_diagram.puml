@@ -1,26 +1,28 @@
 @startuml
-title Button Press -> ISR -> Kernel Event Bit Array -> State Machine Thread -> ADC -> LED1 Timers
+title Button Press -> ISR -> Kernel Event Bit Array -> State Machine Thread -> ADC -> LED1 Timers / Buffered ADC
 
 participant "User" as User
 participant "GPIO HW" as GPIO
-participant "Button ISR\nCallbacks\n(sleep/reset)" as ISR
+participant "Button ISR\nCallbacks\n(sleep/reset/freq_up)" as ISR
 participant "Kernel Event\nBit Array\nbutton_events" as KEvents
 participant "State Machine Thread\n(main)" as Main
-participant "ADC HW\n(adc_single)" as ADC
+participant "ADC HW\n(adc_single / adc_diff)" as ADC
 participant "LED1 Blink Timer\n(led1_blink_timer)" as BlinkTimer
 participant "LED1 Done Timer\n(led1_done_timer)" as DoneTimer
 participant "GPIO LEDs\n(heartbeat, iv_pump, error)" as LEDs
 
-== IDLE state: main waits for BUTTON0 or RESET ==
+== IDLE state: main waits for BUTTON0, BUTTON1, or RESET ==
 Main -> KEvents : k_event_wait(BTN_EVENT_MASK,\nreset=true,\nK_FOREVER)\n[blocking]
 activate Main
 
-note over User : BUTTON0 or RESET is pressed
+note over User : BUTTON0, BUTTON1, or RESET is pressed
 User -> GPIO : physical button press
 GPIO -> ISR : interrupt fires
 
 alt BUTTON0 pressed
   ISR -> KEvents : k_event_post(BTN_SINGLE_SAMPLE_EVENT)
+else BUTTON1 pressed
+  ISR -> KEvents : k_event_post(BTN_DIFF_BUFFERED_EVENT)
 else RESET pressed
   ISR -> KEvents : k_event_post(BTN_RESET_EVENT)
 end
@@ -35,11 +37,18 @@ alt RESET wins (events & BTN_RESET_EVENT)
   Main -> LEDs : error_led = 0
   Main -> LEDs : iv_pump = 0
   Main -> GPIO : enable BUTTON0 interrupt\n(GPIO_INT_EDGE_TO_ACTIVE)
+  Main -> GPIO : enable BUTTON1 interrupt\n(GPIO_INT_EDGE_TO_ACTIVE)
   Main -> Main : state = IDLE
 
 else BUTTON0 pressed (events & BTN_SINGLE_SAMPLE_EVENT)
   Main -> GPIO : disable BUTTON0 interrupt\n(GPIO_INT_DISABLE)
+  Main -> GPIO : disable BUTTON1 interrupt\n(GPIO_INT_DISABLE)
   Main -> Main : state = SINGLE_SAMPLE
+
+else BUTTON1 pressed (events & BTN_DIFF_BUFFERED_EVENT)
+  Main -> GPIO : disable BUTTON0 interrupt\n(GPIO_INT_DISABLE)
+  Main -> GPIO : disable BUTTON1 interrupt\n(GPIO_INT_DISABLE)
+  Main -> Main : state = DIFF_BUFFERED
 end
 
 == SINGLE_SAMPLE state: main performs one ADC read ==
@@ -52,17 +61,19 @@ alt ADC read fails
   Main -> LEDs : iv_pump = 0
   Main -> LEDs : error_led = 1
   Main -> GPIO : disable BUTTON0 interrupt\n(GPIO_INT_DISABLE)
+  Main -> GPIO : disable BUTTON1 interrupt\n(GPIO_INT_DISABLE)
   Main -> Main : state = ERROR
 
 else ADC read succeeds
   ADC --> Main : raw ADC buffer
   Main -> ADC : adc_raw_to_millivolts_dt(...)
-  
+
   alt ADC conversion fails
     ADC --> Main : ret < 0
     Main -> LEDs : iv_pump = 0
     Main -> LEDs : error_led = 1
     Main -> GPIO : disable BUTTON0 interrupt\n(GPIO_INT_DISABLE)
+    Main -> GPIO : disable BUTTON1 interrupt\n(GPIO_INT_DISABLE)
     Main -> Main : state = ERROR
 
   else ADC conversion succeeds
@@ -115,6 +126,40 @@ else RESET pressed
   Main -> DoneTimer : k_timer_stop()
   Main -> LEDs : iv_pump = 0
   Main -> Main : state = IDLE
+end
+deactivate Main
+
+== DIFF_BUFFERED state: main performs buffered differential ADC read ==
+activate Main
+Main -> Main : LOG_INF("Starting buffered differential ADC acquisition")
+Main -> ADC : adc_sequence_init_dt(...)
+Main -> ADC : adc_read(adc_diff.dev, &sequence)\nwith extra_samplings and interval_us
+
+alt Buffered ADC read fails
+  ADC --> Main : ret < 0
+  Main -> LEDs : iv_pump = 0
+  Main -> LEDs : error_led = 1
+  Main -> GPIO : disable BUTTON0 interrupt\n(GPIO_INT_DISABLE)
+  Main -> GPIO : disable BUTTON1 interrupt\n(GPIO_INT_DISABLE)
+  Main -> Main : state = ERROR
+
+else Buffered ADC read succeeds
+  ADC --> Main : diff_buf[] filled
+  Main -> Main : LOG_INF("Buffered differential ADC read complete")
+  Main -> Main : LOG_HEXDUMP_INF(diff_buf, ...)
+  Main -> Main : diff_freq_hz = calc_freq_zero_crossing(...)
+
+  alt Frequency calculation fails
+    Main -> LEDs : iv_pump = 0
+    Main -> LEDs : error_led = 1
+    Main -> GPIO : disable BUTTON0 interrupt\n(GPIO_INT_DISABLE)
+    Main -> GPIO : disable BUTTON1 interrupt\n(GPIO_INT_DISABLE)
+    Main -> Main : state = ERROR
+
+  else Frequency calculation succeeds
+    Main -> Main : LOG_INF("Buffered signal frequency: ... Hz")
+    Main -> Main : state = IDLE
+  end
 end
 deactivate Main
 

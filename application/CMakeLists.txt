@@ -12,4 +12,7 @@ project(duke-bme554-ecg-temp-ble-lab)
 set(NO_BUILD_TYPE_WARNING TRUE)
 
 # make sure to add the source code for new libraries
-target_sources(app PRIVATE src/main.c)
+target_sources(app PRIVATE
+    src/main.c
+    src/calc_freq.c
+)
