@@ -7,7 +7,7 @@
 #include <zephyr/smf.h> 
 #include <zephyr/drivers/adc.h> 
 #include "calc_freq.h"
-// #include <zephyr/drivers/pwm.h> // CONFIG_PWM=y
+#include <zephyr/drivers/pwm.h> // CONFIG_PWM=y
 // #include "ble-lib.h" // BME554 BLE library (remember to add to CMakeLists.txt)
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
@@ -84,12 +84,11 @@ static int clamp_mv(int32_t mv)
     return mv;
 }
 
-static double map_mv_to_freq(int32_t mv)
+/* Placeholder for future PWM mapping */
+static uint8_t map_mv_to_duty(int32_t mv)
 {
-    double mv_clamped = (double)clamp_mv(mv);
-
-    return (double)LED1_MIN_HZ +
-           mv_clamped * ((double)(LED1_MAX_HZ - LED1_MIN_HZ)) / (double)ADC_MAX_MV;
+    int32_t mv_clamped = clamp_mv(mv);
+    return (uint8_t)((mv_clamped * 100) / ADC_MAX_MV);
 }
 
 static int period_ms(double freq)
@@ -140,6 +139,11 @@ static const struct adc_dt_spec adc_diff =
 
 static const struct gpio_dt_spec freq_up_button = 
     GPIO_DT_SPEC_GET(DT_ALIAS(frequpbutton), gpios);
+
+/* PWM definitions */
+
+static const struct pwm_dt_spec led2_pwm =
+    PWM_DT_SPEC_GET(DT_ALIAS(pwm_led2));
 
 /* callback prototypes */
 void sleep_button_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins);
@@ -422,8 +426,15 @@ static enum smf_state_result idle_run(void *o)
         smf_set_state(SMF_CTX(s), &app_states[STATE_IDLE]);
         return SMF_EVENT_HANDLED;
     }
+    /*
+    if (events & BTN_SINGLE_SAMPLE_EVENT) {
+        smf_set_state(SMF_CTX(s), &app_states[STATE_SINGLE_SAMPLE]);
+        return SMF_EVENT_HANDLED;
+    }
+    */
 
     if (events & BTN_SINGLE_SAMPLE_EVENT) {
+        LOG_INF("Single sample event (PWM not yet implemented)");
         smf_set_state(SMF_CTX(s), &app_states[STATE_SINGLE_SAMPLE]);
         return SMF_EVENT_HANDLED;
     }
@@ -450,7 +461,8 @@ static void single_sample_entry(void *o)
         return;
     }
 
-    smf_set_state(SMF_CTX(s), &app_states[STATE_LED1_ACTIVE]);
+    /* Placeholder: will drive PWM in next commit */
+    smf_set_state(SMF_CTX(s), &app_states[STATE_IDLE]);
 }
 
 static enum smf_state_result single_sample_run(void *o)
@@ -595,6 +607,19 @@ int main(void)
     return ret;
 }
 
+static int set_led2_duty_cycle(uint8_t duty_percent)
+{
+    if (!device_is_ready(led2_pwm.dev)) {
+        LOG_ERR("PWM device not ready");
+        return -ENODEV;
+    }
+
+    uint32_t period = PWM_USEC(1000); // 1 kHz PWM (placeholder)
+    uint32_t pulse = (period * duty_percent) / 100;
+
+    return pwm_set_dt(&led2_pwm, period, pulse);
+}
+
 static int do_single_sample(struct app_object *s)
 {
     int ret;
@@ -624,15 +649,12 @@ static int do_single_sample(struct app_object *s)
     }
 
     s->adc_mv = val_mv;
-    s->led1_freq_hz = map_mv_to_freq(s->adc_mv);
+    uint8_t duty = map_mv_to_duty(s->adc_mv);
 
-    int freq_mhz = (int)(s->led1_freq_hz * 1000.0);
-
-    LOG_INF("ADC raw=%d, mv=%d, freq=%d.%03d Hz",
+    LOG_INF("ADC raw=%d, mv=%d, duty=%d%%",
             s->adc_raw,
             s->adc_mv,
-            freq_mhz / 1000,
-            freq_mhz % 1000);
+            duty);
 
     return 0;
 }
