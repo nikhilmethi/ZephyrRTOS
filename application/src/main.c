@@ -309,23 +309,8 @@ static void disable_single_sample_button(void)
 
 static void start_led1_timers(struct app_object *s)
 {
-    int on_ms = on_time_ms(s->led1_freq_hz);
-    int off_ms = off_time_ms(s->led1_freq_hz);
-
-    s->led1_is_on = true;
-    set_led1(true);
-
-    k_timer_start(&led1_blink_timer, K_MSEC(on_ms), K_NO_WAIT);
-    k_timer_start(&led1_done_timer, K_MSEC(LED1_ACTIVE_DURATION_MS), K_NO_WAIT);
-
-    int freq_mhz = (int)(s->led1_freq_hz * 1000.0);
-
-    LOG_INF("LED1 blinking for %d ms at %d.%03d Hz (on=%d ms, off=%d ms)",
-            LED1_ACTIVE_DURATION_MS,
-            freq_mhz / 1000,
-            freq_mhz % 1000,
-            on_ms,
-            off_ms);
+    ARG_UNUSED(s);
+    /* LED1 functionality removed for PWM lab */
 }
 
 static enum smf_state_result init_run(void *o)
@@ -423,9 +408,9 @@ static void idle_entry(void *o)
     gpio_pin_set_dt(&error_led, 0);
     set_led1(false);
     enable_single_sample_button();
-    enable_diff_buffered_button();
+    disable_diff_buffered_button();
 
-    LOG_INF("IDLE: press single-sample button to update LED2 PWM");
+    LOG_INF("IDLE: AIN0 controls LED2 brightness via PWM");
 }
 
 static enum smf_state_result idle_run(void *o)
@@ -461,7 +446,7 @@ static enum smf_state_result idle_run(void *o)
     }
 
     if (events & BTN_DIFF_BUFFERED_EVENT) {
-        smf_set_state(SMF_CTX(s), &app_states[STATE_DIFF_BUFFERED]);
+        LOG_INF("Diff buffered event ignored (not implemented yet)");
         return SMF_EVENT_HANDLED;
     }
 
@@ -511,42 +496,7 @@ static void led1_active_entry(void *o)
 
 static enum smf_state_result led1_active_run(void *o)
 {
-    struct app_object *s = (struct app_object *)o;
-    uint32_t events = k_event_wait(&button_events,
-                                   BTN_RESET_EVENT | LED1_TIMER_EVENT | LED1_DONE_EVENT,
-                                   true,
-                                   K_FOREVER);
-
-    if (events & BTN_RESET_EVENT) {
-        k_timer_stop(&led1_blink_timer);
-        k_timer_stop(&led1_done_timer);
-        set_led1(false);
-        smf_set_state(SMF_CTX(s), &app_states[STATE_IDLE]);
-        return SMF_EVENT_HANDLED;
-    }
-
-    if (events & LED1_TIMER_EVENT) {
-        int next_ms;
-
-        s->led1_is_on = !s->led1_is_on;
-        set_led1(s->led1_is_on);
-
-        if (s->led1_is_on) {
-            next_ms = on_time_ms(s->led1_freq_hz);
-        } else {
-            next_ms = off_time_ms(s->led1_freq_hz);
-        }
-
-        k_timer_start(&led1_blink_timer, K_MSEC(next_ms), K_NO_WAIT);
-    }
-
-    if (events & LED1_DONE_EVENT) {
-        k_timer_stop(&led1_blink_timer);
-        set_led1(false);
-        smf_set_state(SMF_CTX(s), &app_states[STATE_IDLE]);
-        return SMF_EVENT_HANDLED;
-    }
-
+    ARG_UNUSED(o);
     return SMF_EVENT_HANDLED;
 }
 
@@ -612,7 +562,7 @@ static const struct smf_state app_states[] = {
     [STATE_INIT]          = SMF_CREATE_STATE(NULL,               init_run,            NULL, NULL, NULL),
     [STATE_IDLE]          = SMF_CREATE_STATE(idle_entry,         idle_run,            NULL, NULL, NULL),
     [STATE_SINGLE_SAMPLE] = SMF_CREATE_STATE(single_sample_entry, single_sample_run, NULL, NULL, NULL),
-    [STATE_LED1_ACTIVE]   = SMF_CREATE_STATE(led1_active_entry,  led1_active_run,     NULL, NULL, NULL),
+    [STATE_LED1_ACTIVE]   = SMF_CREATE_STATE(NULL, NULL, NULL, NULL, NULL),
     [STATE_DIFF_BUFFERED] = SMF_CREATE_STATE(diff_buffered_entry, diff_buffered_run,  NULL, NULL, NULL),
     [STATE_ERROR]         = SMF_CREATE_STATE(error_entry,        error_run,           error_exit, NULL, NULL),
 };
@@ -796,7 +746,7 @@ static int fail_adc_async(struct app_object *s, int err, const char *msg)
 void led1_blink_timer_handler(struct k_timer *t)
 {
     ARG_UNUSED(t);
-    k_event_post(&button_events, LED1_TIMER_EVENT);
+    /* LED1 disabled for PWM lab */
 }
 
 void led1_blink_timer_stop(struct k_timer *t)
@@ -807,7 +757,7 @@ void led1_blink_timer_stop(struct k_timer *t)
 void led1_done_timer_handler(struct k_timer *t)
 {
     ARG_UNUSED(t);
-    k_event_post(&button_events, LED1_DONE_EVENT);
+    /* LED1 disabled for PWM lab */
 }
 
 void led1_done_timer_stop(struct k_timer *t)
