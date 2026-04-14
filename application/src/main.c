@@ -36,6 +36,10 @@ LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 
 #define ADC_ASYNC_TIMEOUT_MS 2000
 
+#define SIN_SAMPLE_INTERVAL_MS 5      // 200 Hz
+#define SIN_DURATION_MS        2000   // 2 seconds
+#define SIN_NUM_SAMPLES        (SIN_DURATION_MS / SIN_SAMPLE_INTERVAL_MS)
+
 extern void heartbeat_thread(void *, void *, void *);
 
 /* heartbeat thread */
@@ -106,6 +110,9 @@ static const struct gpio_dt_spec freq_up_button =
 static const struct pwm_dt_spec led2_pwm =
     PWM_DT_SPEC_GET(DT_ALIAS(pwm_led2));
 
+static const struct pwm_dt_spec led3_pwm =
+    PWM_DT_SPEC_GET(DT_ALIAS(pwm_led3));
+
 /* callback prototypes */
 void sleep_button_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins);
 void reset_button_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins);
@@ -121,7 +128,7 @@ enum app_state {
     STATE_INIT,
     STATE_IDLE,
     STATE_SINGLE_SAMPLE,
-    STATE_DIFF_BUFFERED,
+    STATE_SINUSOID,
     STATE_ERROR,
 };
 
@@ -140,6 +147,9 @@ struct app_object {
     /* async ADC support */
     struct k_poll_signal adc_async_signal;
     struct k_poll_event adc_async_evt;
+
+    uint32_t sin_sample_count;
+    bool sin_active;
 };
 
 static struct app_object s_obj;
@@ -161,6 +171,7 @@ static int do_diff_buffered_sample_async(struct app_object *s);
 static void reset_adc_async_poll(struct app_object *s);
 static int fail_adc_async(struct app_object *s, int err, const char *msg);
 static int set_led2_duty_cycle(uint8_t duty_percent);
+static int set_led3_duty_cycle(uint8_t duty_percent);
 
 static int setup_adc_single(void)
 {
@@ -213,8 +224,8 @@ static void idle_entry(void *o);
 static enum smf_state_result idle_run(void *o);
 static void single_sample_entry(void *o);
 static enum smf_state_result single_sample_run(void *o);
-static void diff_buffered_entry(void *o);
-static enum smf_state_result diff_buffered_run(void *o);
+static void sinusoid_entry(void *o);
+static enum smf_state_result sinusoid_run(void *o);
 
 static int init_app_object(struct app_object *s)
 {
@@ -240,6 +251,9 @@ static int init_app_object(struct app_object *s)
         K_POLL_MODE_NOTIFY_ONLY,
         &s->adc_async_signal
     );
+
+    s->sin_sample_count = 0;
+    s->sin_active = false;
 
     return 0;
 }
@@ -338,6 +352,19 @@ static enum smf_state_result init_run(void *o)
         return SMF_EVENT_HANDLED;
     }
 
+    if (!device_is_ready(led3_pwm.dev)) {
+        LOG_ERR("LED3 PWM device not ready");
+        smf_set_state(SMF_CTX(s), &app_states[STATE_ERROR]);
+        return SMF_EVENT_HANDLED;
+    }
+
+    err = set_led3_duty_cycle(0);
+    if (err < 0) {
+        LOG_ERR("Failed to initialize LED3 PWM (%d)", err);
+        smf_set_state(SMF_CTX(s), &app_states[STATE_ERROR]);
+        return SMF_EVENT_HANDLED;
+    }
+
     LOG_INF("Diff ADC buffer: %d samples, interval=%d us",
         DIFF_BUFFER_LEN, DIFF_SAMPLE_INTERVAL_US);
 
@@ -378,21 +405,15 @@ static enum smf_state_result idle_run(void *o)
         smf_set_state(SMF_CTX(s), &app_states[STATE_IDLE]);
         return SMF_EVENT_HANDLED;
     }
-    /*
-    if (events & BTN_SINGLE_SAMPLE_EVENT) {
-        smf_set_state(SMF_CTX(s), &app_states[STATE_SINGLE_SAMPLE]);
-        return SMF_EVENT_HANDLED;
-    }
-    */
 
     if (events & BTN_SINGLE_SAMPLE_EVENT) {
-        LOG_INF("Single sample event (PWM not yet implemented)");
+        LOG_INF("Single sample event: updating LED2 PWM from AIN0");
         smf_set_state(SMF_CTX(s), &app_states[STATE_SINGLE_SAMPLE]);
         return SMF_EVENT_HANDLED;
     }
 
     if (events & BTN_DIFF_BUFFERED_EVENT) {
-        LOG_INF("Diff buffered event ignored (not implemented yet)");
+        smf_set_state(SMF_CTX(s), &app_states[STATE_SINUSOID]);
         return SMF_EVENT_HANDLED;
     }
 
@@ -434,27 +455,17 @@ static enum smf_state_result single_sample_run(void *o)
     return SMF_EVENT_HANDLED;
 }
 
-static void diff_buffered_entry(void *o)
+static void sinusoid_entry(void *o)
 {
-    LOG_INF("Starting async buffered differential ADC sequence");
+    struct app_object *s = o;
 
-    struct app_object *s = (struct app_object *)o;
-    int ret;
+    s->sin_sample_count = 0;
+    s->sin_active = true;
 
-    disable_single_sample_button();
-    disable_diff_buffered_button();
-
-    ret = do_diff_buffered_sample_async(s);
-    if (ret < 0) {
-        smf_set_state(SMF_CTX(s), &app_states[STATE_ERROR]);
-        return;
-    }
-
-    LOG_INF("Async buffered differential ADC sequence complete → returning to IDLE");
-    smf_set_state(SMF_CTX(s), &app_states[STATE_IDLE]);
+    LOG_INF("Starting sinusoidal PWM modulation");
 }
 
-static enum smf_state_result diff_buffered_run(void *o)
+static enum smf_state_result sinusoid_run(void *o)
 {
     ARG_UNUSED(o);
     return SMF_EVENT_HANDLED;
@@ -494,7 +505,7 @@ static const struct smf_state app_states[] = {
     [STATE_INIT]          = SMF_CREATE_STATE(NULL,               init_run,            NULL, NULL, NULL),
     [STATE_IDLE]          = SMF_CREATE_STATE(idle_entry,         idle_run,            NULL, NULL, NULL),
     [STATE_SINGLE_SAMPLE] = SMF_CREATE_STATE(single_sample_entry, single_sample_run, NULL, NULL, NULL),
-    [STATE_DIFF_BUFFERED] = SMF_CREATE_STATE(diff_buffered_entry, diff_buffered_run,  NULL, NULL, NULL),
+    [STATE_SINUSOID] = SMF_CREATE_STATE(sinusoid_entry, sinusoid_run,  NULL, NULL, NULL),
     [STATE_ERROR]         = SMF_CREATE_STATE(error_entry,        error_run,           error_exit, NULL, NULL),
 };
 
@@ -535,6 +546,23 @@ static int set_led2_duty_cycle(uint8_t duty_percent)
     uint32_t pulse = (period * (100 - duty_percent)) / 100;
 
     return pwm_set_dt(&led2_pwm, period, pulse);
+}
+
+static int set_led3_duty_cycle(uint8_t duty_percent)
+{
+    if (!device_is_ready(led3_pwm.dev)) {
+        LOG_ERR("PWM device not ready");
+        return -ENODEV;
+    }
+
+    if (duty_percent > 100) {
+        duty_percent = 100;
+    }
+
+    uint32_t period = PWM_USEC(1000);
+    uint32_t pulse = (period * (100 - duty_percent)) / 100;
+
+    return pwm_set_dt(&led3_pwm, period, pulse);
 }
 
 static int do_single_sample(struct app_object *s)
