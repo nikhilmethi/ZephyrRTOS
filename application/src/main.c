@@ -7,10 +7,10 @@
 #include <zephyr/smf.h> 
 #include <zephyr/drivers/adc.h> 
 #include "calc_freq.h"
-// #include <zephyr/drivers/pwm.h> // CONFIG_PWM=y
+#include <zephyr/drivers/pwm.h> // CONFIG_PWM=y
 // #include "ble-lib.h" // BME554 BLE library (remember to add to CMakeLists.txt)
 
-LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
+LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 #define ADC_DT_SPEC_GET_BY_ALIAS(adc_alias)                    \
 {                                                             \
     .dev = DEVICE_DT_GET(DT_PARENT(DT_ALIAS(adc_alias))),      \
@@ -25,12 +25,7 @@ LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
 #define HEARTBEAT_STACK_SIZE 1024
 #define HEARTBEAT_THREAD_PRIO 5
 
-#define LED1_MIN_HZ 1
-#define LED1_MAX_HZ 5
 #define ADC_MAX_MV 3000
-
-#define LED1_DUTY_PERCENT 10
-#define LED1_ACTIVE_DURATION_MS 5000
 
 #define DIFF_SAMPLE_INTERVAL_US 5000   // 5 ms → 200 Hz sampling
 #define DIFF_SIGNAL_FREQ_HZ     10     // expected input signal
@@ -56,18 +51,7 @@ K_THREAD_DEFINE(heartbeat_thread_id,
 #define BTN_DIFF_BUFFERED_EVENT BIT(2)
 #define BTN_EVENT_MASK          (BTN_SINGLE_SAMPLE_EVENT | BTN_RESET_EVENT | BTN_DIFF_BUFFERED_EVENT)
 
-#define LED1_TIMER_EVENT        BIT(3)
-#define LED1_DONE_EVENT         BIT(4)
-
 K_EVENT_DEFINE(button_events);
-
-void led1_blink_timer_handler(struct k_timer *t);
-void led1_blink_timer_stop(struct k_timer *t);
-void led1_done_timer_handler(struct k_timer *t);
-void led1_done_timer_stop(struct k_timer *t);
-
-K_TIMER_DEFINE(led1_blink_timer, led1_blink_timer_handler, led1_blink_timer_stop);
-K_TIMER_DEFINE(led1_done_timer, led1_done_timer_handler, led1_done_timer_stop);
 
 /* helper timing functions */
 
@@ -84,35 +68,11 @@ static int clamp_mv(int32_t mv)
     return mv;
 }
 
-static double map_mv_to_freq(int32_t mv)
+/* Placeholder for future PWM mapping */
+static uint8_t map_mv_to_duty(int32_t mv)
 {
-    double mv_clamped = (double)clamp_mv(mv);
-
-    return (double)LED1_MIN_HZ +
-           mv_clamped * ((double)(LED1_MAX_HZ - LED1_MIN_HZ)) / (double)ADC_MAX_MV;
-}
-
-static int period_ms(double freq)
-{
-    return (int)(1000.0 / freq);
-}
-
-static int on_time_ms(double freq)
-{
-    int p = period_ms(freq);
-    int on = (int)((p * LED1_DUTY_PERCENT) / 100.0);
-
-    if (on < 1) on = 1;
-    return on;
-}
-
-static int off_time_ms(double freq)
-{
-    int p = period_ms(freq);
-    int off = p - on_time_ms(freq);
-
-    if (off < 1) off = 1;
-    return off;
+    int32_t mv_clamped = clamp_mv(mv);
+    return (uint8_t)((mv_clamped * 100) / ADC_MAX_MV);
 }
 
 /* hardware definitions */
@@ -141,6 +101,11 @@ static const struct adc_dt_spec adc_diff =
 static const struct gpio_dt_spec freq_up_button = 
     GPIO_DT_SPEC_GET(DT_ALIAS(frequpbutton), gpios);
 
+/* PWM definitions */
+
+static const struct pwm_dt_spec led2_pwm =
+    PWM_DT_SPEC_GET(DT_ALIAS(pwm_led2));
+
 /* callback prototypes */
 void sleep_button_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins);
 void reset_button_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins);
@@ -156,7 +121,6 @@ enum app_state {
     STATE_INIT,
     STATE_IDLE,
     STATE_SINGLE_SAMPLE,
-    STATE_LED1_ACTIVE,
     STATE_DIFF_BUFFERED,
     STATE_ERROR,
 };
@@ -166,11 +130,8 @@ struct app_object {
 
     uint64_t hb_last_ns;
 
-    bool led1_is_on;
-
     int16_t adc_raw;
     int32_t adc_mv;
-    double led1_freq_hz;
 
     /* buffered differential ADC */
     int16_t diff_buf[DIFF_BUFFER_LEN];
@@ -189,7 +150,6 @@ static int init_app_object(struct app_object *s);
 static void set_led1(bool on);
 static void enable_single_sample_button(void);
 static void disable_single_sample_button(void);
-static void start_led1_timers(struct app_object *s);
 static int do_single_sample(struct app_object *s);
 static int setup_adc_diff(void);
 static void enable_diff_buffered_button(void);
@@ -200,6 +160,7 @@ static enum adc_action adc_async_callback(const struct device *dev,
 static int do_diff_buffered_sample_async(struct app_object *s);
 static void reset_adc_async_poll(struct app_object *s);
 static int fail_adc_async(struct app_object *s, int err, const char *msg);
+static int set_led2_duty_cycle(uint8_t duty_percent);
 
 static int setup_adc_single(void)
 {
@@ -252,8 +213,6 @@ static void idle_entry(void *o);
 static enum smf_state_result idle_run(void *o);
 static void single_sample_entry(void *o);
 static enum smf_state_result single_sample_run(void *o);
-static void led1_active_entry(void *o);
-static enum smf_state_result led1_active_run(void *o);
 static void diff_buffered_entry(void *o);
 static enum smf_state_result diff_buffered_run(void *o);
 
@@ -265,11 +224,8 @@ static int init_app_object(struct app_object *s)
 
     s->hb_last_ns = 0;
 
-    s->led1_is_on = false;
-
     s->adc_raw = 0;
     s->adc_mv = 0;
-    s->led1_freq_hz = (double)LED1_MIN_HZ;
 
     s->diff_freq_hz = 0.0;
 
@@ -301,27 +257,6 @@ static void enable_single_sample_button(void)
 static void disable_single_sample_button(void)
 {
     gpio_pin_interrupt_configure_dt(&sleep_button, GPIO_INT_DISABLE);
-}
-
-static void start_led1_timers(struct app_object *s)
-{
-    int on_ms = on_time_ms(s->led1_freq_hz);
-    int off_ms = off_time_ms(s->led1_freq_hz);
-
-    s->led1_is_on = true;
-    set_led1(true);
-
-    k_timer_start(&led1_blink_timer, K_MSEC(on_ms), K_NO_WAIT);
-    k_timer_start(&led1_done_timer, K_MSEC(LED1_ACTIVE_DURATION_MS), K_NO_WAIT);
-
-    int freq_mhz = (int)(s->led1_freq_hz * 1000.0);
-
-    LOG_INF("LED1 blinking for %d ms at %d.%03d Hz (on=%d ms, off=%d ms)",
-            LED1_ACTIVE_DURATION_MS,
-            freq_mhz / 1000,
-            freq_mhz % 1000,
-            on_ms,
-            off_ms);
 }
 
 static enum smf_state_result init_run(void *o)
@@ -374,7 +309,7 @@ static enum smf_state_result init_run(void *o)
     err = gpio_add_callback_dt(&freq_up_button, &freq_up_button_cb);
     if (err < 0) { LOG_ERR("Cannot add freq_up button callback."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
 
-    k_event_clear(&button_events, BTN_EVENT_MASK | LED1_TIMER_EVENT | LED1_DONE_EVENT);
+    k_event_clear(&button_events, BTN_EVENT_MASK);
 
     k_thread_name_set(heartbeat_thread_id, "heartbeat");
 
@@ -386,6 +321,19 @@ static enum smf_state_result init_run(void *o)
 
     err = setup_adc_diff();
     if (err < 0) {
+        smf_set_state(SMF_CTX(s), &app_states[STATE_ERROR]);
+        return SMF_EVENT_HANDLED;
+    }
+
+    if (!device_is_ready(led2_pwm.dev)) {
+        LOG_ERR("LED2 PWM device not ready");
+        smf_set_state(SMF_CTX(s), &app_states[STATE_ERROR]);
+        return SMF_EVENT_HANDLED;
+    }
+
+    err = set_led2_duty_cycle(0);
+    if (err < 0) {
+        LOG_ERR("Failed to initialize LED2 PWM (%d)", err);
         smf_set_state(SMF_CTX(s), &app_states[STATE_ERROR]);
         return SMF_EVENT_HANDLED;
     }
@@ -406,9 +354,9 @@ static void idle_entry(void *o)
     gpio_pin_set_dt(&error_led, 0);
     set_led1(false);
     enable_single_sample_button();
-    enable_diff_buffered_button();
+    disable_diff_buffered_button();
 
-    LOG_INF("IDLE");
+    LOG_INF("IDLE: press BUTTON1 to sample AIN0 and update LED2 PWM");
 }
 
 static enum smf_state_result idle_run(void *o)
@@ -419,17 +367,32 @@ static enum smf_state_result idle_run(void *o)
     LOG_INF("Button Event Posted: %u", events);
 
     if (events & BTN_RESET_EVENT) {
+        int ret = set_led2_duty_cycle(0);
+        if (ret < 0) {
+            LOG_ERR("Failed to reset LED2 PWM (%d)", ret);
+            smf_set_state(SMF_CTX(s), &app_states[STATE_ERROR]);
+            return SMF_EVENT_HANDLED;
+        }
+
+        LOG_INF("Reset event: LED2 PWM set to 0%% duty");
         smf_set_state(SMF_CTX(s), &app_states[STATE_IDLE]);
         return SMF_EVENT_HANDLED;
     }
+    /*
+    if (events & BTN_SINGLE_SAMPLE_EVENT) {
+        smf_set_state(SMF_CTX(s), &app_states[STATE_SINGLE_SAMPLE]);
+        return SMF_EVENT_HANDLED;
+    }
+    */
 
     if (events & BTN_SINGLE_SAMPLE_EVENT) {
+        LOG_INF("Single sample event (PWM not yet implemented)");
         smf_set_state(SMF_CTX(s), &app_states[STATE_SINGLE_SAMPLE]);
         return SMF_EVENT_HANDLED;
     }
 
     if (events & BTN_DIFF_BUFFERED_EVENT) {
-        smf_set_state(SMF_CTX(s), &app_states[STATE_DIFF_BUFFERED]);
+        LOG_INF("Diff buffered event ignored (not implemented yet)");
         return SMF_EVENT_HANDLED;
     }
 
@@ -440,6 +403,7 @@ static void single_sample_entry(void *o)
 {
     struct app_object *s = (struct app_object *)o;
     int ret;
+    uint8_t duty;
 
     disable_single_sample_button();
     disable_diff_buffered_button();
@@ -450,59 +414,23 @@ static void single_sample_entry(void *o)
         return;
     }
 
-    smf_set_state(SMF_CTX(s), &app_states[STATE_LED1_ACTIVE]);
+    duty = map_mv_to_duty(s->adc_mv);
+
+    ret = set_led2_duty_cycle(duty);
+    if (ret < 0) {
+        LOG_ERR("Failed to set LED2 duty cycle (%d)", ret);
+        smf_set_state(SMF_CTX(s), &app_states[STATE_ERROR]);
+        return;
+    }
+
+    LOG_INF("LED2 PWM updated to %u%% duty", duty);
+
+    smf_set_state(SMF_CTX(s), &app_states[STATE_IDLE]);
 }
 
 static enum smf_state_result single_sample_run(void *o)
 {
     ARG_UNUSED(o);
-    return SMF_EVENT_HANDLED;
-}
-
-static void led1_active_entry(void *o)
-{
-    struct app_object *s = (struct app_object *)o;
-    start_led1_timers(s);
-}
-
-static enum smf_state_result led1_active_run(void *o)
-{
-    struct app_object *s = (struct app_object *)o;
-    uint32_t events = k_event_wait(&button_events,
-                                   BTN_RESET_EVENT | LED1_TIMER_EVENT | LED1_DONE_EVENT,
-                                   true,
-                                   K_FOREVER);
-
-    if (events & BTN_RESET_EVENT) {
-        k_timer_stop(&led1_blink_timer);
-        k_timer_stop(&led1_done_timer);
-        set_led1(false);
-        smf_set_state(SMF_CTX(s), &app_states[STATE_IDLE]);
-        return SMF_EVENT_HANDLED;
-    }
-
-    if (events & LED1_TIMER_EVENT) {
-        int next_ms;
-
-        s->led1_is_on = !s->led1_is_on;
-        set_led1(s->led1_is_on);
-
-        if (s->led1_is_on) {
-            next_ms = on_time_ms(s->led1_freq_hz);
-        } else {
-            next_ms = off_time_ms(s->led1_freq_hz);
-        }
-
-        k_timer_start(&led1_blink_timer, K_MSEC(next_ms), K_NO_WAIT);
-    }
-
-    if (events & LED1_DONE_EVENT) {
-        k_timer_stop(&led1_blink_timer);
-        set_led1(false);
-        smf_set_state(SMF_CTX(s), &app_states[STATE_IDLE]);
-        return SMF_EVENT_HANDLED;
-    }
-
     return SMF_EVENT_HANDLED;
 }
 
@@ -538,14 +466,12 @@ static void error_entry(void *o)
 
     ARG_UNUSED(s);
 
-    k_timer_stop(&led1_blink_timer);
-    k_timer_stop(&led1_done_timer);
     set_led1(false);
     disable_single_sample_button();
     gpio_pin_set_dt(&error_led, 1);
     disable_diff_buffered_button();
 
-    LOG_ERR("Entered ERROR state; async/sync ADC flow aborted");
+    LOG_ERR("Entered ERROR state");
 }
 
 static enum smf_state_result error_run(void *o)
@@ -568,7 +494,6 @@ static const struct smf_state app_states[] = {
     [STATE_INIT]          = SMF_CREATE_STATE(NULL,               init_run,            NULL, NULL, NULL),
     [STATE_IDLE]          = SMF_CREATE_STATE(idle_entry,         idle_run,            NULL, NULL, NULL),
     [STATE_SINGLE_SAMPLE] = SMF_CREATE_STATE(single_sample_entry, single_sample_run, NULL, NULL, NULL),
-    [STATE_LED1_ACTIVE]   = SMF_CREATE_STATE(led1_active_entry,  led1_active_run,     NULL, NULL, NULL),
     [STATE_DIFF_BUFFERED] = SMF_CREATE_STATE(diff_buffered_entry, diff_buffered_run,  NULL, NULL, NULL),
     [STATE_ERROR]         = SMF_CREATE_STATE(error_entry,        error_run,           error_exit, NULL, NULL),
 };
@@ -593,6 +518,23 @@ int main(void)
     }
 
     return ret;
+}
+
+static int set_led2_duty_cycle(uint8_t duty_percent)
+{
+    if (!device_is_ready(led2_pwm.dev)) {
+        LOG_ERR("PWM device not ready");
+        return -ENODEV;
+    }
+
+    if (duty_percent > 100) {
+        duty_percent = 100;
+    }
+
+    uint32_t period = PWM_USEC(1000);
+    uint32_t pulse = (period * (100 - duty_percent)) / 100;
+
+    return pwm_set_dt(&led2_pwm, period, pulse);
 }
 
 static int do_single_sample(struct app_object *s)
@@ -624,15 +566,12 @@ static int do_single_sample(struct app_object *s)
     }
 
     s->adc_mv = val_mv;
-    s->led1_freq_hz = map_mv_to_freq(s->adc_mv);
+    uint8_t duty = map_mv_to_duty(s->adc_mv);
 
-    int freq_mhz = (int)(s->led1_freq_hz * 1000.0);
-
-    LOG_INF("ADC raw=%d, mv=%d, freq=%d.%03d Hz",
+    LOG_INF("ADC raw=%d, mv=%d, LED2 duty=%d%%",
             s->adc_raw,
             s->adc_mv,
-            freq_mhz / 1000,
-            freq_mhz % 1000);
+            duty);
 
     return 0;
 }
@@ -735,30 +674,6 @@ static int fail_adc_async(struct app_object *s, int err, const char *msg)
     LOG_ERR("%s (%d)", msg, err);
     reset_adc_async_poll(s);
     return err;
-}
-
-/* timer handlers */
-
-void led1_blink_timer_handler(struct k_timer *t)
-{
-    ARG_UNUSED(t);
-    k_event_post(&button_events, LED1_TIMER_EVENT);
-}
-
-void led1_blink_timer_stop(struct k_timer *t)
-{
-    ARG_UNUSED(t);
-}
-
-void led1_done_timer_handler(struct k_timer *t)
-{
-    ARG_UNUSED(t);
-    k_event_post(&button_events, LED1_DONE_EVENT);
-}
-
-void led1_done_timer_stop(struct k_timer *t)
-{
-    ARG_UNUSED(t);
 }
 
 /* GPIO callbacks */

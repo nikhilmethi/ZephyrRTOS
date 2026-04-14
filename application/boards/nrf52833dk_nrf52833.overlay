@@ -4,18 +4,28 @@
 	};
 
 	aliases {
-        heartbeat = &led0;      // LED0 in code, LED1 on board
-        ivpump = &led1;         // use as LED1 output for single-sample stage
-        buzzer = &led2;
-        error = &led3;
+		heartbeat = &led0;       /* LED0 in code, LED1 on board */
+		ivpump = &led1;          /* existing GPIO alias, still okay for now */
+		buzzer = &led2;
+		error = &led3;
 
-        sleepbutton = &button0; // use as BUTTON0 trigger
-        frequpbutton = &button1; // use as BUTTON1 trigger
-        freqdownbutton = &button2;
-        resetbutton = &button3;
+		sleepbutton = &button0;
+		frequpbutton = &button1;
+		freqdownbutton = &button2;
+		resetbutton = &button3;
 
-        vadc-single = &vadc_single;
-        vadc-diff = &vadc_diff;
+		vadc-single = &vadc_single;
+		vadc-diff = &vadc_diff;
+
+		pwm-led2 = &pwm_led2;
+	};
+
+	pwmleds {
+		compatible = "pwm-leds";
+
+		pwm_led2: pwm_led2 {
+			pwms = <&pwm0 0 PWM_USEC(1000) PWM_POLARITY_INVERTED>;
+		};
 	};
 };
 
@@ -41,5 +51,27 @@
 		zephyr,input-positive = <NRF_SAADC_AIN1>;
 		zephyr,input-negative = <NRF_SAADC_AIN2>;
 		zephyr,resolution = <12>;
+	};
+};
+
+&pwm0 {
+	status = "okay";
+	pinctrl-0 = <&pwm0_default>;
+	pinctrl-1 = <&pwm0_sleep>;
+	pinctrl-names = "default", "sleep";
+};
+
+&pinctrl {
+	pwm0_default: pwm0_default {
+		group1 {
+			psels = <NRF_PSEL(PWM_OUT0, 0, 14)>;
+		};
+	};
+
+	pwm0_sleep: pwm0_sleep {
+		group1 {
+			psels = <NRF_PSEL(PWM_OUT0, 0, 14)>;
+			low-power-enable;
+		};
 	};
 };
