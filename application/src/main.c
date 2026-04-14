@@ -394,6 +394,19 @@ static enum smf_state_result init_run(void *o)
         return SMF_EVENT_HANDLED;
     }
 
+    if (!device_is_ready(led2_pwm.dev)) {
+        LOG_ERR("LED2 PWM device not ready");
+        smf_set_state(SMF_CTX(s), &app_states[STATE_ERROR]);
+        return SMF_EVENT_HANDLED;
+    }
+
+    err = set_led2_duty_cycle(0);
+    if (err < 0) {
+        LOG_ERR("Failed to initialize LED2 PWM (%d)", err);
+        smf_set_state(SMF_CTX(s), &app_states[STATE_ERROR]);
+        return SMF_EVENT_HANDLED;
+    }
+
     LOG_INF("Diff ADC buffer: %d samples, interval=%d us",
         DIFF_BUFFER_LEN, DIFF_SAMPLE_INTERVAL_US);
 
@@ -412,7 +425,7 @@ static void idle_entry(void *o)
     enable_single_sample_button();
     enable_diff_buffered_button();
 
-    LOG_INF("IDLE");
+    LOG_INF("IDLE: press single-sample button to update LED2 PWM");
 }
 
 static enum smf_state_result idle_run(void *o)
@@ -423,6 +436,14 @@ static enum smf_state_result idle_run(void *o)
     LOG_INF("Button Event Posted: %u", events);
 
     if (events & BTN_RESET_EVENT) {
+        int ret = set_led2_duty_cycle(0);
+        if (ret < 0) {
+            LOG_ERR("Failed to reset LED2 PWM (%d)", ret);
+            smf_set_state(SMF_CTX(s), &app_states[STATE_ERROR]);
+            return SMF_EVENT_HANDLED;
+        }
+
+        LOG_INF("Reset event: LED2 PWM set to 0%% duty");
         smf_set_state(SMF_CTX(s), &app_states[STATE_IDLE]);
         return SMF_EVENT_HANDLED;
     }
@@ -451,6 +472,7 @@ static void single_sample_entry(void *o)
 {
     struct app_object *s = (struct app_object *)o;
     int ret;
+    uint8_t duty;
 
     disable_single_sample_button();
     disable_diff_buffered_button();
@@ -461,7 +483,17 @@ static void single_sample_entry(void *o)
         return;
     }
 
-    /* Placeholder: will drive PWM in next commit */
+    duty = map_mv_to_duty(s->adc_mv);
+
+    ret = set_led2_duty_cycle(duty);
+    if (ret < 0) {
+        LOG_ERR("Failed to set LED2 duty cycle (%d)", ret);
+        smf_set_state(SMF_CTX(s), &app_states[STATE_ERROR]);
+        return;
+    }
+
+    LOG_INF("LED2 PWM updated to %u%% duty", duty);
+
     smf_set_state(SMF_CTX(s), &app_states[STATE_IDLE]);
 }
 
@@ -651,7 +683,7 @@ static int do_single_sample(struct app_object *s)
     s->adc_mv = val_mv;
     uint8_t duty = map_mv_to_duty(s->adc_mv);
 
-    LOG_INF("ADC raw=%d, mv=%d, duty=%d%%",
+    LOG_INF("ADC raw=%d, mv=%d, LED2 duty=%d%%",
             s->adc_raw,
             s->adc_mv,
             duty);
