@@ -172,6 +172,7 @@ static void reset_adc_async_poll(struct app_object *s);
 static int fail_adc_async(struct app_object *s, int err, const char *msg);
 static int set_led2_duty_cycle(uint8_t duty_percent);
 static int set_led3_duty_cycle(uint8_t duty_percent);
+static int do_diff_single_sample(int32_t *mv_out);
 
 static int setup_adc_single(void)
 {
@@ -462,12 +463,40 @@ static void sinusoid_entry(void *o)
     s->sin_sample_count = 0;
     s->sin_active = true;
 
-    LOG_INF("Starting sinusoidal PWM modulation");
+    LOG_INF("BUTTON2 pressed: starting sinusoidal PWM modulation");
 }
 
 static enum smf_state_result sinusoid_run(void *o)
 {
-    ARG_UNUSED(o);
+    struct app_object *s = o;
+
+    if (!s->sin_active) {
+        return SMF_EVENT_HANDLED;
+    }
+
+    int32_t mv;
+    int ret = do_diff_single_sample(&mv);
+    if (ret < 0) {
+        smf_set_state(SMF_CTX(s), &app_states[STATE_ERROR]);
+        return SMF_EVENT_HANDLED;
+    }
+
+    /* shift bipolar signal into 0–3V range */
+    int32_t shifted_mv = mv + (ADC_MAX_MV / 2);
+
+    uint8_t duty = map_mv_to_duty(shifted_mv);
+
+    ret = set_led3_duty_cycle(duty);
+    if (ret < 0) {
+        LOG_ERR("Failed to set LED3 duty (%d)", ret);
+        smf_set_state(SMF_CTX(s), &app_states[STATE_ERROR]);
+        return SMF_EVENT_HANDLED;
+    }
+
+    s->sin_sample_count++;
+
+    k_msleep(SIN_SAMPLE_INTERVAL_MS);
+
     return SMF_EVENT_HANDLED;
 }
 
@@ -601,6 +630,36 @@ static int do_single_sample(struct app_object *s)
             s->adc_mv,
             duty);
 
+    return 0;
+}
+
+static int do_diff_single_sample(int32_t *mv_out)
+{
+    int16_t buf = 0;
+    int32_t val_mv = 0;
+
+    struct adc_sequence sequence = {
+        .buffer = &buf,
+        .buffer_size = sizeof(buf),
+    };
+
+    (void)adc_sequence_init_dt(&adc_diff, &sequence);
+
+    int ret = adc_read(adc_diff.dev, &sequence);
+    if (ret < 0) {
+        LOG_ERR("Diff ADC read failed (%d)", ret);
+        return ret;
+    }
+
+    val_mv = buf;
+
+    ret = adc_raw_to_millivolts_dt(&adc_diff, &val_mv);
+    if (ret < 0) {
+        LOG_ERR("Diff ADC conversion failed");
+        return ret;
+    }
+
+    *mv_out = val_mv;
     return 0;
 }
 
