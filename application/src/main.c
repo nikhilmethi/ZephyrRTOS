@@ -384,7 +384,7 @@ static void idle_entry(void *o)
     enable_single_sample_button();
     disable_diff_buffered_button();
 
-    LOG_INF("IDLE: press BUTTON1 to sample AIN0 and update LED2 PWM");
+    LOG_INF("IDLE: BUTTON1 updates LED2 PWM, BUTTON2 starts 2 second LED3 sinusoidal PWM");
 }
 
 static enum smf_state_result idle_run(void *o)
@@ -395,14 +395,23 @@ static enum smf_state_result idle_run(void *o)
     LOG_INF("Button Event Posted: %u", events);
 
     if (events & BTN_RESET_EVENT) {
-        int ret = set_led2_duty_cycle(0);
+        int ret;
+
+        ret = set_led2_duty_cycle(0);
         if (ret < 0) {
             LOG_ERR("Failed to reset LED2 PWM (%d)", ret);
             smf_set_state(SMF_CTX(s), &app_states[STATE_ERROR]);
             return SMF_EVENT_HANDLED;
         }
 
-        LOG_INF("Reset event: LED2 PWM set to 0%% duty");
+        ret = set_led3_duty_cycle(0);
+        if (ret < 0) {
+            LOG_ERR("Failed to reset LED3 PWM (%d)", ret);
+            smf_set_state(SMF_CTX(s), &app_states[STATE_ERROR]);
+            return SMF_EVENT_HANDLED;
+        }
+
+        LOG_INF("Reset event: LED2 and LED3 PWM set to 0%% duty");
         smf_set_state(SMF_CTX(s), &app_states[STATE_IDLE]);
         return SMF_EVENT_HANDLED;
     }
@@ -460,17 +469,50 @@ static void sinusoid_entry(void *o)
 {
     struct app_object *s = o;
 
+    disable_single_sample_button();
+    disable_diff_buffered_button();
+
     s->sin_sample_count = 0;
     s->sin_active = true;
 
-    LOG_INF("BUTTON2 pressed: starting sinusoidal PWM modulation");
+    LOG_INF("BUTTON2 pressed: starting 2 second sinusoidal PWM modulation");
 }
 
 static enum smf_state_result sinusoid_run(void *o)
 {
     struct app_object *s = o;
 
+    uint32_t events = k_event_wait(&button_events, BTN_RESET_EVENT, true, K_NO_WAIT);
+    if (events & BTN_RESET_EVENT) {
+        int ret = set_led3_duty_cycle(0);
+        if (ret < 0) {
+            LOG_ERR("Failed to reset LED3 PWM (%d)", ret);
+            smf_set_state(SMF_CTX(s), &app_states[STATE_ERROR]);
+            return SMF_EVENT_HANDLED;
+        }
+
+        s->sin_active = false;
+        LOG_INF("Sinusoidal PWM interrupted by reset");
+        smf_set_state(SMF_CTX(s), &app_states[STATE_IDLE]);
+        return SMF_EVENT_HANDLED;
+    }
+
     if (!s->sin_active) {
+        smf_set_state(SMF_CTX(s), &app_states[STATE_IDLE]);
+        return SMF_EVENT_HANDLED;
+    }
+
+    if (s->sin_sample_count >= SIN_NUM_SAMPLES) {
+        int ret = set_led3_duty_cycle(0);
+        if (ret < 0) {
+            LOG_ERR("Failed to stop LED3 PWM (%d)", ret);
+            smf_set_state(SMF_CTX(s), &app_states[STATE_ERROR]);
+            return SMF_EVENT_HANDLED;
+        }
+
+        s->sin_active = false;
+        LOG_INF("Sinusoidal PWM complete after %u samples", s->sin_sample_count);
+        smf_set_state(SMF_CTX(s), &app_states[STATE_IDLE]);
         return SMF_EVENT_HANDLED;
     }
 
@@ -483,7 +525,6 @@ static enum smf_state_result sinusoid_run(void *o)
 
     /* shift bipolar signal into 0–3V range */
     int32_t shifted_mv = mv + (ADC_MAX_MV / 2);
-
     uint8_t duty = map_mv_to_duty(shifted_mv);
 
     ret = set_led3_duty_cycle(duty);
@@ -507,6 +548,8 @@ static void error_entry(void *o)
     ARG_UNUSED(s);
 
     set_led1(false);
+    (void)set_led2_duty_cycle(0);
+    (void)set_led3_duty_cycle(0);
     disable_single_sample_button();
     gpio_pin_set_dt(&error_led, 1);
     disable_diff_buffered_button();
