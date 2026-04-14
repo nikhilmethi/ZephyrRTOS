@@ -10,7 +10,7 @@
 #include <zephyr/drivers/pwm.h> // CONFIG_PWM=y
 // #include "ble-lib.h" // BME554 BLE library (remember to add to CMakeLists.txt)
 
-LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);
+LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 #define ADC_DT_SPEC_GET_BY_ALIAS(adc_alias)                    \
 {                                                             \
     .dev = DEVICE_DT_GET(DT_PARENT(DT_ALIAS(adc_alias))),      \
@@ -160,6 +160,7 @@ static enum adc_action adc_async_callback(const struct device *dev,
 static int do_diff_buffered_sample_async(struct app_object *s);
 static void reset_adc_async_poll(struct app_object *s);
 static int fail_adc_async(struct app_object *s, int err, const char *msg);
+static int set_led2_duty_cycle(uint8_t duty_percent);
 
 static int setup_adc_single(void)
 {
@@ -308,7 +309,7 @@ static enum smf_state_result init_run(void *o)
     err = gpio_add_callback_dt(&freq_up_button, &freq_up_button_cb);
     if (err < 0) { LOG_ERR("Cannot add freq_up button callback."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
 
-    k_event_clear(&button_events, BTN_EVENT_MASK | LED1_TIMER_EVENT | LED1_DONE_EVENT);
+    k_event_clear(&button_events, BTN_EVENT_MASK);
 
     k_thread_name_set(heartbeat_thread_id, "heartbeat");
 
@@ -355,7 +356,7 @@ static void idle_entry(void *o)
     enable_single_sample_button();
     disable_diff_buffered_button();
 
-    LOG_INF("IDLE: AIN0 controls LED2 brightness via PWM");
+    LOG_INF("IDLE: press BUTTON1 to sample AIN0 and update LED2 PWM");
 }
 
 static enum smf_state_result idle_run(void *o)
@@ -471,8 +472,6 @@ static void error_entry(void *o)
     disable_diff_buffered_button();
 
     LOG_ERR("Entered ERROR state");
-
-    LOG_ERR("Entered ERROR state; async/sync ADC flow aborted");
 }
 
 static enum smf_state_result error_run(void *o)
@@ -528,8 +527,12 @@ static int set_led2_duty_cycle(uint8_t duty_percent)
         return -ENODEV;
     }
 
-    uint32_t period = PWM_USEC(1000); // 1 kHz PWM (placeholder)
-    uint32_t pulse = (period * duty_percent) / 100;
+    if (duty_percent > 100) {
+        duty_percent = 100;
+    }
+
+    uint32_t period = PWM_USEC(1000);
+    uint32_t pulse = (period * (100 - duty_percent)) / 100;
 
     return pwm_set_dt(&led2_pwm, period, pulse);
 }
