@@ -6,7 +6,7 @@
 #include <zephyr/sys/atomic.h>
 #include <zephyr/smf.h> 
 #include <zephyr/drivers/adc.h> 
-// #include "calc_freq.h"
+// // #include "calc_freq.h"
 #include <zephyr/drivers/pwm.h> // CONFIG_PWM=y
 // #include "ble-lib.h" // BME554 BLE library (remember to add to CMakeLists.txt)
 
@@ -63,7 +63,6 @@ static int clamp_mv(int32_t mv)
     return mv;
 }
 
-/* Placeholder for future PWM mapping */
 static uint8_t map_mv_to_duty(int32_t mv)
 {
     int32_t mv_clamped = clamp_mv(mv);
@@ -90,12 +89,6 @@ static const struct gpio_dt_spec reset_button =
 static const struct adc_dt_spec adc_single = 
     ADC_DT_SPEC_GET_BY_ALIAS(vadc_single);
 
-static const struct adc_dt_spec adc_diff = 
-    ADC_DT_SPEC_GET_BY_ALIAS(vadc_diff);
-
-static const struct gpio_dt_spec freq_up_button = 
-    GPIO_DT_SPEC_GET(DT_ALIAS(frequpbutton), gpios);
-
 /* PWM definitions */
 
 static const struct pwm_dt_spec led2_pwm =
@@ -107,12 +100,10 @@ static const struct pwm_dt_spec led3_pwm =
 /* callback prototypes */
 void sleep_button_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins);
 void reset_button_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins);
-void freq_up_button_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins);
 
 /* callback structs */
 static struct gpio_callback sleep_button_cb;
 static struct gpio_callback reset_button_cb;
-static struct gpio_callback freq_up_button_cb;
 
 /* SMF state machine */
 enum app_state {
@@ -254,9 +245,6 @@ static enum smf_state_result init_run(void *o)
     err = gpio_pin_configure_dt(&reset_button, GPIO_INPUT);
     if (err < 0) { LOG_ERR("Cannot configure reset button."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
 
-    err = gpio_pin_configure_dt(&freq_up_button, GPIO_INPUT);
-    if (err < 0) { LOG_ERR("Cannot configure freq_up button."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
-
     err = gpio_pin_configure_dt(&heartbeat_led, GPIO_OUTPUT_INACTIVE);
     if (err < 0) { LOG_ERR("Cannot configure heartbeat LED."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
 
@@ -272,9 +260,6 @@ static enum smf_state_result init_run(void *o)
     err = gpio_pin_interrupt_configure_dt(&reset_button, GPIO_INT_EDGE_TO_ACTIVE);
     if (err < 0) { LOG_ERR("Cannot attach callback to sw3."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
 
-    err = gpio_pin_interrupt_configure_dt(&freq_up_button, GPIO_INT_EDGE_TO_ACTIVE);
-    if (err < 0) { LOG_ERR("Cannot attach callback to sw1."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
-
     gpio_init_callback(&sleep_button_cb, sleep_button_callback, BIT(sleep_button.pin));
     err = gpio_add_callback_dt(&sleep_button, &sleep_button_cb);
     if (err < 0) { LOG_ERR("Cannot add sleep button callback."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
@@ -283,21 +268,11 @@ static enum smf_state_result init_run(void *o)
     err = gpio_add_callback_dt(&reset_button, &reset_button_cb);
     if (err < 0) { LOG_ERR("Cannot add reset button callback."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
 
-    gpio_init_callback(&freq_up_button_cb, freq_up_button_callback, BIT(freq_up_button.pin));
-    err = gpio_add_callback_dt(&freq_up_button, &freq_up_button_cb);
-    if (err < 0) { LOG_ERR("Cannot add freq_up button callback."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
-
     k_event_clear(&button_events, BTN_EVENT_MASK);
 
     k_thread_name_set(heartbeat_thread_id, "heartbeat");
 
     err = setup_adc_single();
-    if (err < 0) {
-        smf_set_state(SMF_CTX(s), &app_states[STATE_ERROR]);
-        return SMF_EVENT_HANDLED;
-    }
-
-    err = setup_adc_diff();
     if (err < 0) {
         smf_set_state(SMF_CTX(s), &app_states[STATE_ERROR]);
         return SMF_EVENT_HANDLED;
@@ -375,6 +350,7 @@ static enum smf_state_result idle_run(void *o)
     }
 
     if (events & BTN_SINGLE_SAMPLE_EVENT) {
+        LOG_INF("Single sample event: updating LED2 PWM from AIN0");
         LOG_INF("Single sample event: updating LED2 PWM from AIN0");
         smf_set_state(SMF_CTX(s), &app_states[STATE_SINGLE_SAMPLE]);
         return SMF_EVENT_HANDLED;
@@ -573,7 +549,7 @@ static int set_led2_duty_cycle(uint8_t duty_percent)
     }
 
     uint32_t period = PWM_USEC(1000);
-    uint32_t pulse = (period * (100 - duty_percent)) / 100;
+    uint32_t pulse = (period * duty_percent) / 100;
 
     return pwm_set_dt(&led2_pwm, period, pulse);
 }
