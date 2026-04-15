@@ -1,4 +1,4 @@
-/{
+/ {
 	zephyr,user {
 		io-channels = <&adc 0>, <&adc 1>;
 	};
@@ -18,6 +18,7 @@
 		vadc-diff = &vadc_diff;
 
 		pwm-led2 = &pwm_led2;
+		pwm-led3 = &pwm_led3;
 	};
 
 	pwmleds {
@@ -25,6 +26,10 @@
 
 		pwm_led2: pwm_led2 {
 			pwms = <&pwm0 0 PWM_USEC(1000) PWM_POLARITY_INVERTED>;
+		};
+
+		pwm_led3: pwm_led3 {
+			pwms = <&pwm0 1 PWM_USEC(1000) PWM_POLARITY_INVERTED>;
 		};
 	};
 };
@@ -64,13 +69,15 @@
 &pinctrl {
 	pwm0_default: pwm0_default {
 		group1 {
-			psels = <NRF_PSEL(PWM_OUT0, 0, 14)>;
+			psels = <NRF_PSEL(PWM_OUT0, 0, 14)>,
+				<NRF_PSEL(PWM_OUT1, 0, 15)>;
 		};
 	};
 
 	pwm0_sleep: pwm0_sleep {
 		group1 {
-			psels = <NRF_PSEL(PWM_OUT0, 0, 14)>;
+			psels = <NRF_PSEL(PWM_OUT0, 0, 14)>,
+				<NRF_PSEL(PWM_OUT1, 0, 15)>;
 			low-power-enable;
 		};
 	};

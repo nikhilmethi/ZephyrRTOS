@@ -340,7 +340,7 @@ static void idle_entry(void *o)
     gpio_pin_set_dt(&error_led, 0);
     set_led1(false);
     enable_single_sample_button();
-    disable_sinusoid_button();
+    enable_sinusoid_button();
 
     LOG_INF("IDLE: BUTTON1 updates LED2 PWM, BUTTON2 starts 2 second LED3 sinusoidal PWM");
 }
