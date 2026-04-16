@@ -27,9 +27,11 @@ LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 
 #define ADC_MAX_MV 3000
 
-#define SIN_SAMPLE_INTERVAL_MS 5      // 200 Hz
+#define SIN_SAMPLE_INTERVAL_US 2500      // 400 Hz
 #define SIN_DURATION_MS        2000   // 2 seconds
-#define SIN_NUM_SAMPLES        (SIN_DURATION_MS / SIN_SAMPLE_INTERVAL_MS)
+#define SIN_NUM_SAMPLES        (SIN_DURATION_MS * 1000 / SIN_SAMPLE_INTERVAL_US)
+
+#define LED_PWM_PERIOD_NS PWM_USEC(1000)
 
 extern void heartbeat_thread(void *, void *, void *);
 
@@ -44,7 +46,11 @@ K_THREAD_DEFINE(heartbeat_thread_id,
 #define BTN_SINGLE_SAMPLE_EVENT BIT(0)
 #define BTN_RESET_EVENT         BIT(1)
 #define BTN_SINUSOID_EVENT      BIT(2)
-#define BTN_EVENT_MASK          (BTN_SINGLE_SAMPLE_EVENT | BTN_RESET_EVENT | BTN_SINUSOID_EVENT)
+#define SIN_SAMPLE_EVENT        BIT(3)
+
+#define BTN_EVENT_MASK          (BTN_SINGLE_SAMPLE_EVENT | \
+                                 BTN_RESET_EVENT         | \
+                                 BTN_SINUSOID_EVENT)
 
 K_EVENT_DEFINE(button_events);
 
@@ -67,6 +73,22 @@ static uint8_t map_mv_to_duty(int32_t mv)
 {
     int32_t mv_clamped = clamp_mv(mv);
     return (uint8_t)((mv_clamped * 100) / ADC_MAX_MV);
+}
+
+#define SIN_INPUT_MIN_MV 650
+#define SIN_INPUT_MAX_MV 2650
+
+static uint8_t map_diff_mv_to_duty(int32_t mv)
+{
+    if (mv < SIN_INPUT_MIN_MV) {
+        mv = SIN_INPUT_MIN_MV;
+    }
+    if (mv > SIN_INPUT_MAX_MV) {
+        mv = SIN_INPUT_MAX_MV;
+    }
+
+    return (uint8_t)(((mv - SIN_INPUT_MIN_MV) * 100) /
+                     (SIN_INPUT_MAX_MV - SIN_INPUT_MIN_MV));
 }
 
 /* hardware definitions */
@@ -132,6 +154,7 @@ struct app_object {
 
     uint32_t sin_sample_count;
     bool sin_active;
+    int32_t sin_mv;
 };
 
 static struct app_object s_obj;
@@ -149,6 +172,10 @@ static void disable_sinusoid_button(void);
 static int set_led2_duty_cycle(uint8_t duty_percent);
 static int set_led3_duty_cycle(uint8_t duty_percent);
 static int do_diff_single_sample(int32_t *mv_out);
+void sin_sample_timer_handler(struct k_timer *t);
+void sin_sample_timer_stop_fn(struct k_timer *t);
+
+K_TIMER_DEFINE(sin_sample_timer, sin_sample_timer_handler, sin_sample_timer_stop_fn);
 
 static int setup_adc_single(void)
 {
@@ -203,6 +230,7 @@ static void single_sample_entry(void *o);
 static enum smf_state_result single_sample_run(void *o);
 static void sinusoid_entry(void *o);
 static enum smf_state_result sinusoid_run(void *o);
+static void sinusoid_exit(void *o);
 
 static int init_app_object(struct app_object *s)
 {
@@ -217,6 +245,7 @@ static int init_app_object(struct app_object *s)
 
     s->sin_sample_count = 0;
     s->sin_active = false;
+    s->sin_mv = 0;
 
     return 0;
 }
@@ -431,23 +460,27 @@ static void sinusoid_entry(void *o)
 
     s->sin_sample_count = 0;
     s->sin_active = true;
+    s->sin_mv = 0;
 
-    LOG_INF("BUTTON2 pressed: starting 2 second sinusoidal PWM modulation");
+    k_event_clear(&button_events, SIN_SAMPLE_EVENT);
+
+    k_timer_start(&sin_sample_timer,
+                  K_USEC(SIN_SAMPLE_INTERVAL_US),
+                  K_USEC(SIN_SAMPLE_INTERVAL_US));
+
+    LOG_INF("BUTTON2 pressed: starting 2 second timer-based sinusoidal PWM modulation");
 }
 
 static enum smf_state_result sinusoid_run(void *o)
 {
     struct app_object *s = o;
 
-    uint32_t events = k_event_wait(&button_events, BTN_RESET_EVENT, true, K_NO_WAIT);
-    if (events & BTN_RESET_EVENT) {
-        int ret = set_led3_duty_cycle(0);
-        if (ret < 0) {
-            LOG_ERR("Failed to reset LED3 PWM (%d)", ret);
-            smf_set_state(SMF_CTX(s), &app_states[STATE_ERROR]);
-            return SMF_EVENT_HANDLED;
-        }
+    uint32_t events = k_event_wait(&button_events,
+                                   BTN_RESET_EVENT | SIN_SAMPLE_EVENT,
+                                   true,
+                                   K_FOREVER);
 
+    if (events & BTN_RESET_EVENT) {
         s->sin_active = false;
         LOG_INF("Sinusoidal PWM interrupted by reset");
         smf_set_state(SMF_CTX(s), &app_states[STATE_IDLE]);
@@ -459,43 +492,52 @@ static enum smf_state_result sinusoid_run(void *o)
         return SMF_EVENT_HANDLED;
     }
 
-    if (s->sin_sample_count >= SIN_NUM_SAMPLES) {
-        int ret = set_led3_duty_cycle(0);
+    if (events & SIN_SAMPLE_EVENT) {
+        int ret;
+
+        if (s->sin_sample_count >= SIN_NUM_SAMPLES) {
+            s->sin_active = false;
+            LOG_INF("Sinusoidal PWM complete after %u samples", s->sin_sample_count);
+            smf_set_state(SMF_CTX(s), &app_states[STATE_IDLE]);
+            return SMF_EVENT_HANDLED;
+        }
+
+        ret = do_diff_single_sample(&s->sin_mv);
         if (ret < 0) {
-            LOG_ERR("Failed to stop LED3 PWM (%d)", ret);
             smf_set_state(SMF_CTX(s), &app_states[STATE_ERROR]);
             return SMF_EVENT_HANDLED;
         }
 
-        s->sin_active = false;
-        LOG_INF("Sinusoidal PWM complete after %u samples", s->sin_sample_count);
-        smf_set_state(SMF_CTX(s), &app_states[STATE_IDLE]);
-        return SMF_EVENT_HANDLED;
+        uint8_t duty = map_diff_mv_to_duty(s->sin_mv);
+
+        ret = set_led3_duty_cycle(duty);
+        if (ret < 0) {
+            LOG_ERR("Failed to set LED3 duty (%d)", ret);
+            smf_set_state(SMF_CTX(s), &app_states[STATE_ERROR]);
+            return SMF_EVENT_HANDLED;
+        }
+
+        s->sin_sample_count++;
+
+        if ((s->sin_sample_count % 5U) == 0U) {
+            LOG_INF("sin[%u] mv=%d duty=%u%%",
+                    s->sin_sample_count, s->sin_mv, duty);
+        }
     }
-
-    int32_t mv;
-    int ret = do_diff_single_sample(&mv);
-    if (ret < 0) {
-        smf_set_state(SMF_CTX(s), &app_states[STATE_ERROR]);
-        return SMF_EVENT_HANDLED;
-    }
-
-    /* shift bipolar signal into 0–3V range */
-    int32_t shifted_mv = mv + (ADC_MAX_MV / 2);
-    uint8_t duty = map_mv_to_duty(shifted_mv);
-
-    ret = set_led3_duty_cycle(duty);
-    if (ret < 0) {
-        LOG_ERR("Failed to set LED3 duty (%d)", ret);
-        smf_set_state(SMF_CTX(s), &app_states[STATE_ERROR]);
-        return SMF_EVENT_HANDLED;
-    }
-
-    s->sin_sample_count++;
-
-    k_msleep(SIN_SAMPLE_INTERVAL_MS);
 
     return SMF_EVENT_HANDLED;
+}
+
+static void sinusoid_exit(void *o)
+{
+    struct app_object *s = o;
+
+    ARG_UNUSED(s);
+
+    k_timer_stop(&sin_sample_timer);
+    k_event_clear(&button_events, SIN_SAMPLE_EVENT);
+    (void)set_led3_duty_cycle(0);
+    LOG_INF("Sinusoid mode exited");
 }
 
 static void error_entry(void *o)
@@ -534,7 +576,7 @@ static const struct smf_state app_states[] = {
     [STATE_INIT]          = SMF_CREATE_STATE(NULL,               init_run,            NULL, NULL, NULL),
     [STATE_IDLE]          = SMF_CREATE_STATE(idle_entry,         idle_run,            NULL, NULL, NULL),
     [STATE_SINGLE_SAMPLE] = SMF_CREATE_STATE(single_sample_entry, single_sample_run, NULL, NULL, NULL),
-    [STATE_SINUSOID] = SMF_CREATE_STATE(sinusoid_entry, sinusoid_run,  NULL, NULL, NULL),
+    [STATE_SINUSOID] = SMF_CREATE_STATE(sinusoid_entry, sinusoid_run,  sinusoid_exit, NULL, NULL),
     [STATE_ERROR]         = SMF_CREATE_STATE(error_entry,        error_run,           error_exit, NULL, NULL),
 };
 
@@ -571,10 +613,8 @@ static int set_led2_duty_cycle(uint8_t duty_percent)
         duty_percent = 100;
     }
 
-    uint32_t period = PWM_USEC(1000);
-    uint32_t pulse = (period * duty_percent) / 100;
-
-    return pwm_set_dt(&led2_pwm, period, pulse);
+    uint32_t pulse = (LED_PWM_PERIOD_NS * duty_percent) / 100;
+    return pwm_set_dt(&led2_pwm, LED_PWM_PERIOD_NS, pulse);
 }
 
 static int set_led3_duty_cycle(uint8_t duty_percent)
@@ -588,10 +628,8 @@ static int set_led3_duty_cycle(uint8_t duty_percent)
         duty_percent = 100;
     }
 
-    uint32_t period = PWM_USEC(1000);
-    uint32_t pulse = (period * duty_percent) / 100;
-
-    return pwm_set_dt(&led3_pwm, period, pulse);
+    uint32_t pulse = (LED_PWM_PERIOD_NS * duty_percent) / 100;
+    return pwm_set_dt(&led3_pwm, LED_PWM_PERIOD_NS, pulse); 
 }
 
 static int do_single_sample(struct app_object *s)
@@ -687,6 +725,17 @@ void freq_up_button_callback(const struct device *dev, struct gpio_callback *cb,
     ARG_UNUSED(cb);
     ARG_UNUSED(pins);
     k_event_post(&button_events, BTN_SINUSOID_EVENT);
+}
+
+void sin_sample_timer_handler(struct k_timer *t)
+{
+    ARG_UNUSED(t);
+    k_event_post(&button_events, SIN_SAMPLE_EVENT);
+}
+
+void sin_sample_timer_stop_fn(struct k_timer *t)
+{
+    ARG_UNUSED(t);
 }
 
 /* threads */
