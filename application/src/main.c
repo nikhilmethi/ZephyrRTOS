@@ -20,8 +20,9 @@ LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 }
 
 /* macros */
-#define HEARTBEAT_ON_MS 250
-#define HEARTBEAT_OFF_MS 750
+#define HEARTBEAT_HALF_PERIOD_MS 500
+#define ERROR_BLINK_HALF_PERIOD_MS 500
+#define ERROR_TIMEOUT_MS (2U * 60U * 1000U)
 
 #define HEARTBEAT_STACK_SIZE 1024
 #define HEARTBEAT_THREAD_PRIO 5
@@ -53,6 +54,7 @@ K_THREAD_DEFINE(heartbeat_thread_id,
 #define APP_EVENT_ECG_SAMPLE        BIT(5)
 #define APP_EVENT_ERROR             BIT(6)
 #define APP_EVENT_ERROR_TIMEOUT     BIT(7)
+#define APP_EVENT_ERROR_BLINK       BIT(8)
 
 #define APP_BUTTON_EVENT_MASK       (APP_EVENT_BUTTON0_IDLE | \
                                      APP_EVENT_BUTTON1_TEMP | \
@@ -63,7 +65,8 @@ K_THREAD_DEFINE(heartbeat_thread_id,
                                      APP_EVENT_ECG_SAMPLE)
 
 #define APP_SYSTEM_EVENT_MASK       (APP_EVENT_ERROR | \
-                                     APP_EVENT_ERROR_TIMEOUT)
+                                     APP_EVENT_ERROR_TIMEOUT | \
+                                     APP_EVENT_ERROR_BLINK)
 
 #define APP_EVENT_MASK              (APP_BUTTON_EVENT_MASK | \
                                      APP_MEASUREMENT_EVENT_MASK | \
@@ -198,6 +201,8 @@ struct app_object {
 
     uint32_t error_code;
     bool terminate_requested;
+    bool error_state_active;
+    bool error_blink_on;
 };
 
 static struct app_object s_obj;
@@ -220,7 +225,13 @@ static int set_led3_duty_cycle(uint8_t duty_percent);
 static int do_single_sample(struct app_object *s);
 static int do_diff_single_sample(int32_t *mv_out);
 
+static void set_error_blink_outputs(bool on);
+void error_blink_timer_handler(struct k_timer *t);
+void error_timeout_timer_handler(struct k_timer *t);
+
 K_TIMER_DEFINE(sin_sample_timer, sin_sample_timer_handler, sin_sample_timer_stop_fn);
+K_TIMER_DEFINE(error_blink_timer, error_blink_timer_handler, NULL);
+K_TIMER_DEFINE(error_timeout_timer, error_timeout_timer_handler, NULL);
 
 /* SMF state handlers */
 static enum smf_state_result init_run(void *o);
@@ -317,6 +328,19 @@ static void set_led1(bool on)
     gpio_pin_set_dt(&iv_pump_led, on ? 1 : 0);
 }
 
+static void set_error_blink_outputs(bool on)
+{
+    int gpio_value = on ? 1 : 0;
+    uint8_t pwm_duty = on ? 100U : 0U;
+
+    (void)gpio_pin_set_dt(&heartbeat_led, gpio_value);
+    (void)gpio_pin_set_dt(&iv_pump_led, gpio_value);
+    (void)gpio_pin_set_dt(&error_led, gpio_value);
+
+    (void)set_led2_duty_cycle(pwm_duty);
+    (void)set_led3_duty_cycle(pwm_duty);
+}
+
 static int init_app_object(struct app_object *s)
 {
     if (s == NULL) {
@@ -337,6 +361,8 @@ static int init_app_object(struct app_object *s)
 
     s->error_code = APP_ERROR_NONE;
     s->terminate_requested = false;
+    s->error_state_active = false;
+    s->error_blink_on = false;
 
     return 0;
 }
@@ -578,19 +604,25 @@ static void error_entry(void *o)
     struct app_object *s = (struct app_object *)o;
 
     s->ecg_active = false;
-
-    set_led1(false);
-    (void)set_led2_duty_cycle(0);
-    (void)set_led3_duty_cycle(0);
+    s->error_state_active = true;
+    s->error_blink_on = false;
 
     disable_measurement_button_interrupts();
-    gpio_pin_set_dt(&error_led, 1);
+
+    set_error_blink_outputs(false);
+
+    k_timer_start(&error_blink_timer,
+                  K_NO_WAIT,
+                  K_MSEC(ERROR_BLINK_HALF_PERIOD_MS));
+
+    k_timer_start(&error_timeout_timer,
+                  K_MSEC(ERROR_TIMEOUT_MS),
+                  K_NO_WAIT);
 
     LOG_ERR("Entered ERROR state with error_code=0x%08x", s->error_code);
 
     /*
      * BLE error notification will be added in the BLE commit.
-     * Full 4-LED in-phase 50%% error blinking will be added in the LED/error commit.
      */
 }
 
@@ -599,11 +631,19 @@ static enum smf_state_result error_run(void *o)
     struct app_object *s = (struct app_object *)o;
 
     uint32_t events = k_event_wait(&app_events,
-                                   APP_EVENT_BUTTON3_RESET | APP_EVENT_ERROR_TIMEOUT,
+                                   APP_EVENT_BUTTON3_RESET |
+                                   APP_EVENT_ERROR_TIMEOUT |
+                                   APP_EVENT_ERROR_BLINK,
                                    true,
                                    K_FOREVER);
 
     LOG_INF("ERROR event mask: 0x%08x", events);
+
+    if (events & APP_EVENT_ERROR_BLINK) {
+        s->error_blink_on = !s->error_blink_on;
+        set_error_blink_outputs(s->error_blink_on);
+        return SMF_EVENT_HANDLED;
+    }
 
     if (events & APP_EVENT_ERROR_TIMEOUT) {
         s->terminate_requested = true;
@@ -624,9 +664,15 @@ static enum smf_state_result error_run(void *o)
 
 static void error_exit(void *o)
 {
-    ARG_UNUSED(o);
+    struct app_object *s = (struct app_object *)o;
 
-    gpio_pin_set_dt(&error_led, 0);
+    k_timer_stop(&error_blink_timer);
+    k_timer_stop(&error_timeout_timer);
+
+    s->error_state_active = false;
+    s->error_blink_on = false;
+
+    set_error_blink_outputs(false);
 }
 
 static const struct smf_state app_states[] = {
@@ -800,6 +846,20 @@ void sin_sample_timer_stop_fn(struct k_timer *t)
     ARG_UNUSED(t);
 }
 
+void error_blink_timer_handler(struct k_timer *t)
+{
+    ARG_UNUSED(t);
+
+    k_event_post(&app_events, APP_EVENT_ERROR_BLINK);
+}
+
+void error_timeout_timer_handler(struct k_timer *t)
+{
+    ARG_UNUSED(t);
+
+    k_event_post(&app_events, APP_EVENT_ERROR_TIMEOUT);
+}
+
 /* threads */
 
 void heartbeat_thread(void *, void *, void *)
@@ -809,24 +869,24 @@ void heartbeat_thread(void *, void *, void *)
     while (1) {
         uint64_t now;
 
-        k_msleep(HEARTBEAT_OFF_MS);
+        /*
+         * In ERROR, LED0 is controlled by the ERROR blink state so that
+         * all four LEDs blink in phase.
+         */
+        if (s_obj.error_state_active) {
+            k_msleep(HEARTBEAT_HALF_PERIOD_MS);
+            continue;
+        }
+
         gpio_pin_toggle_dt(&heartbeat_led);
 
         now = now_ns();
         if (s_obj.hb_last_ns != 0U) {
-            LOG_INF("heart toggle period (ns): %llu",
+            LOG_INF("heartbeat toggle period ns: %llu",
                     (unsigned long long)(now - s_obj.hb_last_ns));
         }
         s_obj.hb_last_ns = now;
 
-        k_msleep(HEARTBEAT_ON_MS);
-        gpio_pin_toggle_dt(&heartbeat_led);
-
-        now = now_ns();
-        if (s_obj.hb_last_ns != 0U) {
-            LOG_INF("heart toggle period (ns): %llu",
-                    (unsigned long long)(now - s_obj.hb_last_ns));
-        }
-        s_obj.hb_last_ns = now;
+        k_msleep(HEARTBEAT_HALF_PERIOD_MS);
     }
 }
