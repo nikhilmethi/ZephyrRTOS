@@ -206,21 +206,41 @@ static const struct smf_state app_states[];
 /* SMF helper prototypes */
 static int init_app_object(struct app_object *s);
 static void set_led1(bool on);
-static void enable_single_sample_button(void);
-static void disable_single_sample_button(void);
-static int do_single_sample(struct app_object *s);
-static int setup_adc_diff(void);
-static void enable_sinusoid_button(void);
-static void disable_sinusoid_button(void);
-static int set_led2_duty_cycle(uint8_t duty_percent);
-static int set_led3_duty_cycle(uint8_t duty_percent);
-static int do_diff_single_sample(int32_t *mv_out);
-void sin_sample_timer_handler(struct k_timer *t);
-void sin_sample_timer_stop_fn(struct k_timer *t);
 static void post_error(struct app_object *s, uint32_t error_bit);
 static void clear_error(struct app_object *s);
 
+static void enable_button_interrupts(void);
+static void disable_measurement_button_interrupts(void);
+
+static int setup_adc_single(void);
+static int setup_adc_diff(void);
+static int set_led2_duty_cycle(uint8_t duty_percent);
+static int set_led3_duty_cycle(uint8_t duty_percent);
+
+static int do_single_sample(struct app_object *s);
+static int do_diff_single_sample(int32_t *mv_out);
+
 K_TIMER_DEFINE(sin_sample_timer, sin_sample_timer_handler, sin_sample_timer_stop_fn);
+
+/* SMF state handlers */
+static enum smf_state_result init_run(void *o);
+
+static void idle_entry(void *o);
+static enum smf_state_result idle_run(void *o);
+
+static void battery_entry(void *o);
+static enum smf_state_result battery_run(void *o);
+
+static void temperature_entry(void *o);
+static enum smf_state_result temperature_run(void *o);
+
+static void ecg_entry(void *o);
+static enum smf_state_result ecg_run(void *o);
+static void ecg_exit(void *o);
+
+static void error_entry(void *o);
+static enum smf_state_result error_run(void *o);
+static void error_exit(void *o);
 
 static int setup_adc_single(void)
 {
@@ -258,47 +278,22 @@ static int setup_adc_diff(void)
     return 0;
 }
 
-static void enable_sinusoid_button(void)
+static void enable_button_interrupts(void)
 {
-    gpio_pin_interrupt_configure_dt(&freq_up_button, GPIO_INT_EDGE_TO_ACTIVE);
+    (void)gpio_pin_interrupt_configure_dt(&sleep_button, GPIO_INT_EDGE_TO_ACTIVE);
+    (void)gpio_pin_interrupt_configure_dt(&freq_up_button, GPIO_INT_EDGE_TO_ACTIVE);
+    (void)gpio_pin_interrupt_configure_dt(&reset_button, GPIO_INT_EDGE_TO_ACTIVE);
 }
 
-static void disable_sinusoid_button(void)
+static void disable_measurement_button_interrupts(void)
 {
-    gpio_pin_interrupt_configure_dt(&freq_up_button, GPIO_INT_DISABLE);
-}
-
-/* SMF state handlers */
-static void idle_entry(void *o);
-static enum smf_state_result idle_run(void *o);
-static void single_sample_entry(void *o);
-static enum smf_state_result single_sample_run(void *o);
-static void sinusoid_entry(void *o);
-static enum smf_state_result sinusoid_run(void *o);
-static void sinusoid_exit(void *o);
-
-static int init_app_object(struct app_object *s)
-{
-    if (s == NULL) {
-        return -EINVAL;
-    }
-
-    memset(s, 0, sizeof(*s));
-
-    s->battery_percent = 0U;
-    s->battery_mv = 0;
-    s->temperature_centi_c = 0;
-
-    s->ecg_active = false;
-    s->ecg_mv = 0;
-    s->heart_rate_bpm = 0U;
-    s->heart_rate_avg_bpm = 0U;
-    s->ecg_sample_count = 0U;
-
-    s->error_code = APP_ERROR_NONE;
-    s->terminate_requested = false;
-
-    return 0;
+    /*
+     * Keep BUTTON3/reset enabled. Later, when BUTTON0 is added explicitly,
+     * it will also remain enabled during measurement states.
+     */
+    (void)gpio_pin_interrupt_configure_dt(&sleep_button, GPIO_INT_DISABLE);
+    (void)gpio_pin_interrupt_configure_dt(&freq_up_button, GPIO_INT_DISABLE);
+    (void)gpio_pin_interrupt_configure_dt(&reset_button, GPIO_INT_EDGE_TO_ACTIVE);
 }
 
 static void post_error(struct app_object *s, uint32_t error_bit)
@@ -322,14 +317,28 @@ static void set_led1(bool on)
     gpio_pin_set_dt(&iv_pump_led, on ? 1 : 0);
 }
 
-static void enable_single_sample_button(void)
+static int init_app_object(struct app_object *s)
 {
-    gpio_pin_interrupt_configure_dt(&sleep_button, GPIO_INT_EDGE_TO_ACTIVE);
-}
+    if (s == NULL) {
+        return -EINVAL;
+    }
 
-static void disable_single_sample_button(void)
-{
-    gpio_pin_interrupt_configure_dt(&sleep_button, GPIO_INT_DISABLE);
+    memset(s, 0, sizeof(*s));
+
+    s->battery_percent = 0U;
+    s->battery_mv = 0;
+    s->temperature_centi_c = 0;
+
+    s->ecg_active = false;
+    s->ecg_mv = 0;
+    s->heart_rate_bpm = 0U;
+    s->heart_rate_avg_bpm = 0U;
+    s->ecg_sample_count = 0U;
+
+    s->error_code = APP_ERROR_NONE;
+    s->terminate_requested = false;
+
+    return 0;
 }
 
 static enum smf_state_result init_run(void *o)
@@ -383,6 +392,7 @@ static enum smf_state_result init_run(void *o)
     if (err < 0) { LOG_ERR("Cannot add freq_up button callback."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
 
     k_event_clear(&app_events, APP_EVENT_MASK);
+    clear_error(s);
 
     k_thread_name_set(heartbeat_thread_id, "heartbeat");
 
@@ -428,223 +438,204 @@ static enum smf_state_result init_run(void *o)
     return SMF_EVENT_HANDLED;
 }
 
-static void idle_entry(void *o)
+ static void idle_entry(void *o)
 {
-    ARG_UNUSED(o);
+    struct app_object *s = (struct app_object *)o;
 
     gpio_pin_set_dt(&error_led, 0);
     set_led1(false);
-    enable_single_sample_button();
-    enable_sinusoid_button();
 
-    LOG_INF("IDLE: BUTTON1 updates LED2 PWM, BUTTON2 starts 2 second LED3 sinusoidal PWM");
+    s->ecg_active = false;
+
+    enable_button_interrupts();
+
+    LOG_INF("IDLE: waiting for BUTTON1 temperature, BUTTON2 ECG, or BUTTON3 reset");
 }
 
 static enum smf_state_result idle_run(void *o)
 {
     struct app_object *s = (struct app_object *)o;
-    uint32_t events = k_event_wait(&app_events, BTN_EVENT_MASK, true, K_FOREVER);
 
-    LOG_INF("Button Event Posted: %u", events);
+    uint32_t events = k_event_wait(&app_events,
+                                   APP_BUTTON_EVENT_MASK | APP_SYSTEM_EVENT_MASK,
+                                   true,
+                                   K_FOREVER);
+
+    LOG_INF("IDLE event mask: 0x%08x", events);
+
+    if (events & APP_EVENT_ERROR) {
+        smf_set_state(SMF_CTX(s), &app_states[STATE_ERROR]);
+        return SMF_EVENT_HANDLED;
+    }
 
     if (events & APP_EVENT_BUTTON3_RESET) {
-        int ret;
+        clear_error(s);
+        s->ecg_active = false;
 
-        ret = set_led2_duty_cycle(0);
-        if (ret < 0) {
-            LOG_ERR("Failed to reset LED2 PWM (%d)", ret);
-            smf_set_state(SMF_CTX(s), &app_states[STATE_ERROR]);
-            return SMF_EVENT_HANDLED;
-        }
+        (void)set_led2_duty_cycle(0);
+        (void)set_led3_duty_cycle(0);
 
-        ret = set_led3_duty_cycle(0);
-        if (ret < 0) {
-            LOG_ERR("Failed to reset LED3 PWM (%d)", ret);
-            smf_set_state(SMF_CTX(s), &app_states[STATE_ERROR]);
-            return SMF_EVENT_HANDLED;
-        }
-
-        LOG_INF("Reset event: LED2 and LED3 PWM set to 0%% duty");
+        LOG_INF("BUTTON3 reset from IDLE: stored measurements preserved");
         smf_set_state(SMF_CTX(s), &app_states[STATE_IDLE]);
         return SMF_EVENT_HANDLED;
     }
 
-    if (events & BTN_SINGLE_SAMPLE_EVENT) {
-        LOG_INF("Single sample event: updating LED2 PWM from AIN0");
-        smf_set_state(SMF_CTX(s), &app_states[STATE_SINGLE_SAMPLE]);
+    if (events & APP_EVENT_BUTTON1_TEMP) {
+        smf_set_state(SMF_CTX(s), &app_states[STATE_TEMPERATURE]);
         return SMF_EVENT_HANDLED;
     }
 
-    if (events & BTN_SINUSOID_EVENT) {
-        smf_set_state(SMF_CTX(s), &app_states[STATE_SINUSOID]);
+    if (events & APP_EVENT_BUTTON2_ECG) {
+        smf_set_state(SMF_CTX(s), &app_states[STATE_ECG]);
+        return SMF_EVENT_HANDLED;
+    }
+
+    if (events & APP_EVENT_BATTERY_SAMPLE) {
+        smf_set_state(SMF_CTX(s), &app_states[STATE_BATTERY]);
         return SMF_EVENT_HANDLED;
     }
 
     return SMF_EVENT_HANDLED;
 }
 
-static void single_sample_entry(void *o)
+static void battery_entry(void *o)
 {
     struct app_object *s = (struct app_object *)o;
-    int ret;
-    uint8_t duty;
 
-    disable_single_sample_button();
-    disable_sinusoid_button();
+    disable_measurement_button_interrupts();
 
-    ret = do_single_sample(s);
-    if (ret < 0) {
-        smf_set_state(SMF_CTX(s), &app_states[STATE_ERROR]);
-        return;
-    }
-
-    duty = map_mv_to_duty(s->adc_mv);
-
-    ret = set_led2_duty_cycle(duty);
-    if (ret < 0) {
-        LOG_ERR("Failed to set LED2 duty cycle (%d)", ret);
-        smf_set_state(SMF_CTX(s), &app_states[STATE_ERROR]);
-        return;
-    }
-
-    LOG_INF("LED2 PWM updated to %u%% duty", duty);
+    /*
+     * Placeholder for Commit 4.
+     * This state will measure AIN0, update battery_percent,
+     * update LED1 brightness, and check the low-battery threshold.
+     */
+    LOG_INF("BATTERY state placeholder");
 
     smf_set_state(SMF_CTX(s), &app_states[STATE_IDLE]);
 }
 
-static enum smf_state_result single_sample_run(void *o)
+static enum smf_state_result battery_run(void *o)
 {
     ARG_UNUSED(o);
     return SMF_EVENT_HANDLED;
 }
 
-static void sinusoid_entry(void *o)
+static void temperature_entry(void *o)
 {
-    struct app_object *s = o;
+    struct app_object *s = (struct app_object *)o;
 
-    disable_single_sample_button();
-    disable_sinusoid_button();
+    disable_measurement_button_interrupts();
 
-    s->sin_sample_count = 0;
-    s->sin_active = true;
-    s->sin_mv = 0;
+    /*
+     * Placeholder for Commit 5.
+     * This state will read MCP9808 temperature over I2C and notify over BLE.
+     */
+    LOG_INF("TEMPERATURE state placeholder");
 
-    k_event_clear(&app_events, SIN_SAMPLE_EVENT);
-
-    k_timer_start(&sin_sample_timer,
-                  K_USEC(SIN_SAMPLE_INTERVAL_US),
-                  K_USEC(SIN_SAMPLE_INTERVAL_US));
-
-    LOG_INF("BUTTON2 pressed: starting 2 second timer-based sinusoidal PWM modulation");
+    smf_set_state(SMF_CTX(s), &app_states[STATE_IDLE]);
 }
 
-static enum smf_state_result sinusoid_run(void *o)
+static enum smf_state_result temperature_run(void *o)
 {
-    struct app_object *s = o;
-
-    uint32_t events = k_event_wait(&app_events,
-                                   APP_EVENT_BUTTON3_RESET | SIN_SAMPLE_EVENT,
-                                   true,
-                                   K_FOREVER);
-
-    if (events & APP_EVENT_BUTTON3_RESET) {
-        s->sin_active = false;
-        LOG_INF("Sinusoidal PWM interrupted by reset");
-        smf_set_state(SMF_CTX(s), &app_states[STATE_IDLE]);
-        return SMF_EVENT_HANDLED;
-    }
-
-    if (!s->sin_active) {
-        smf_set_state(SMF_CTX(s), &app_states[STATE_IDLE]);
-        return SMF_EVENT_HANDLED;
-    }
-
-    if (events & SIN_SAMPLE_EVENT) {
-        int ret;
-
-        if (s->sin_sample_count >= SIN_NUM_SAMPLES) {
-            s->sin_active = false;
-            LOG_INF("Sinusoidal PWM complete after %u samples", s->sin_sample_count);
-            smf_set_state(SMF_CTX(s), &app_states[STATE_IDLE]);
-            return SMF_EVENT_HANDLED;
-        }
-
-        ret = do_diff_single_sample(&s->sin_mv);
-        if (ret < 0) {
-            smf_set_state(SMF_CTX(s), &app_states[STATE_ERROR]);
-            return SMF_EVENT_HANDLED;
-        }
-
-        uint8_t duty = map_diff_mv_to_duty(s->sin_mv);
-
-        ret = set_led3_duty_cycle(duty);
-        if (ret < 0) {
-            LOG_ERR("Failed to set LED3 duty (%d)", ret);
-            smf_set_state(SMF_CTX(s), &app_states[STATE_ERROR]);
-            return SMF_EVENT_HANDLED;
-        }
-
-        s->sin_sample_count++;
-
-        if ((s->sin_sample_count % 5U) == 0U) {
-            LOG_INF("sin[%u] mv=%d duty=%u%%",
-                    s->sin_sample_count, s->sin_mv, duty);
-        }
-    }
-
+    ARG_UNUSED(o);
     return SMF_EVENT_HANDLED;
 }
 
-static void sinusoid_exit(void *o)
+static void ecg_entry(void *o)
 {
-    struct app_object *s = o;
+    struct app_object *s = (struct app_object *)o;
 
-    ARG_UNUSED(s);
+    disable_measurement_button_interrupts();
 
-    k_timer_stop(&sin_sample_timer);
-    k_event_clear(&app_events, SIN_SAMPLE_EVENT);
-    (void)set_led3_duty_cycle(0);
-    LOG_INF("Sinusoid mode exited");
+    s->ecg_active = true;
+    s->ecg_sample_count = 0U;
+
+    /*
+     * Placeholder for Commit 6.
+     * This state will start ECG sampling and calculate average heart rate.
+     */
+    LOG_INF("ECG state placeholder: live ECG measurements active");
+
+    smf_set_state(SMF_CTX(s), &app_states[STATE_IDLE]);
+}
+
+static enum smf_state_result ecg_run(void *o)
+{
+    ARG_UNUSED(o);
+    return SMF_EVENT_HANDLED;
+}
+
+static void ecg_exit(void *o)
+{
+    struct app_object *s = (struct app_object *)o;
+
+    s->ecg_active = false;
+    LOG_INF("Exited ECG state");
 }
 
 static void error_entry(void *o)
 {
     struct app_object *s = (struct app_object *)o;
 
-    ARG_UNUSED(s);
+    s->ecg_active = false;
 
     set_led1(false);
     (void)set_led2_duty_cycle(0);
     (void)set_led3_duty_cycle(0);
-    disable_single_sample_button();
-    gpio_pin_set_dt(&error_led, 1);
-    disable_sinusoid_button();
 
-    LOG_ERR("Entered ERROR state");
+    disable_measurement_button_interrupts();
+    gpio_pin_set_dt(&error_led, 1);
+
+    LOG_ERR("Entered ERROR state with error_code=0x%08x", s->error_code);
+
+    /*
+     * BLE error notification will be added in the BLE commit.
+     * Full 4-LED in-phase 50%% error blinking will be added in the LED/error commit.
+     */
 }
 
 static enum smf_state_result error_run(void *o)
 {
     struct app_object *s = (struct app_object *)o;
-    uint32_t events = k_event_wait(&app_events, APP_EVENT_BUTTON3_RESET, true, K_FOREVER);
 
-    LOG_INF("Button Event Posted: %u", events);
-    smf_set_state(SMF_CTX(s), &app_states[STATE_IDLE]);
+    uint32_t events = k_event_wait(&app_events,
+                                   APP_EVENT_BUTTON3_RESET | APP_EVENT_ERROR_TIMEOUT,
+                                   true,
+                                   K_FOREVER);
+
+    LOG_INF("ERROR event mask: 0x%08x", events);
+
+    if (events & APP_EVENT_ERROR_TIMEOUT) {
+        s->terminate_requested = true;
+        LOG_ERR("ERROR timeout reached; requesting graceful termination");
+        smf_set_terminate(SMF_CTX(s), -ETIMEDOUT);
+        return SMF_EVENT_HANDLED;
+    }
+
+    if (events & APP_EVENT_BUTTON3_RESET) {
+        clear_error(s);
+        s->terminate_requested = false;
+        smf_set_state(SMF_CTX(s), &app_states[STATE_IDLE]);
+        return SMF_EVENT_HANDLED;
+    }
+
     return SMF_EVENT_HANDLED;
 }
 
 static void error_exit(void *o)
 {
     ARG_UNUSED(o);
+
     gpio_pin_set_dt(&error_led, 0);
 }
 
 static const struct smf_state app_states[] = {
-    [STATE_INIT]          = SMF_CREATE_STATE(NULL,               init_run,            NULL, NULL, NULL),
-    [STATE_IDLE]          = SMF_CREATE_STATE(idle_entry,         idle_run,            NULL, NULL, NULL),
-    [STATE_SINGLE_SAMPLE] = SMF_CREATE_STATE(single_sample_entry, single_sample_run, NULL, NULL, NULL),
-    [STATE_SINUSOID] = SMF_CREATE_STATE(sinusoid_entry, sinusoid_run,  sinusoid_exit, NULL, NULL),
-    [STATE_ERROR]         = SMF_CREATE_STATE(error_entry,        error_run,           error_exit, NULL, NULL),
+    [STATE_INIT]        = SMF_CREATE_STATE(NULL,              init_run,         NULL,      NULL, NULL),
+    [STATE_IDLE]        = SMF_CREATE_STATE(idle_entry,        idle_run,         NULL,      NULL, NULL),
+    [STATE_BATTERY]     = SMF_CREATE_STATE(battery_entry,     battery_run,      NULL,      NULL, NULL),
+    [STATE_TEMPERATURE] = SMF_CREATE_STATE(temperature_entry, temperature_run,  NULL,      NULL, NULL),
+    [STATE_ECG]         = SMF_CREATE_STATE(ecg_entry,         ecg_run,          ecg_exit,  NULL, NULL),
+    [STATE_ERROR]       = SMF_CREATE_STATE(error_entry,       error_run,        error_exit,NULL, NULL),
 };
 
 int main(void)
