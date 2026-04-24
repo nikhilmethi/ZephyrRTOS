@@ -3,7 +3,6 @@
 #include <zephyr/devicetree.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/logging/log.h>
-#include <zephyr/sys/atomic.h>
 #include <zephyr/smf.h> 
 #include <zephyr/drivers/adc.h> 
 #include "calc_freq.h"
@@ -37,12 +36,12 @@ static const struct device *i2c_dev = DEVICE_DT_GET(DT_NODELABEL(i2c0));
 #define HEARTBEAT_STACK_SIZE 1024
 #define HEARTBEAT_THREAD_PRIO 5
 
-#define ADC_MAX_MV 3000
 #define BATTERY_SAMPLE_INTERVAL_MS (60U * 1000U)
 #define BATTERY_MAX_MV            3000
 #define BATTERY_LOW_THRESHOLD_PCT 75U
 
 #define LED_PWM_PERIOD_NS PWM_USEC(1000)
+#define LED1_SW_PWM_PERIOD_MS 20U
 
 #define ECG_SAMPLE_INTERVAL_US 2500U   // 400 Hz
 #define ECG_WINDOW_MS          2000U
@@ -68,7 +67,6 @@ K_THREAD_DEFINE(heartbeat_thread_id,
 
 /* button events (main-facing) */
 /* application events */
-#define APP_EVENT_BUTTON0_IDLE      BIT(0)
 #define APP_EVENT_BUTTON1_TEMP      BIT(1)
 #define APP_EVENT_BUTTON2_ECG       BIT(2)
 #define APP_EVENT_BUTTON3_RESET     BIT(3)
@@ -78,8 +76,7 @@ K_THREAD_DEFINE(heartbeat_thread_id,
 #define APP_EVENT_ERROR_TIMEOUT     BIT(7)
 #define APP_EVENT_ERROR_BLINK       BIT(8)
 
-#define APP_BUTTON_EVENT_MASK       (APP_EVENT_BUTTON0_IDLE | \
-                                     APP_EVENT_BUTTON1_TEMP | \
+#define APP_BUTTON_EVENT_MASK       (APP_EVENT_BUTTON1_TEMP | \
                                      APP_EVENT_BUTTON2_ECG | \
                                      APP_EVENT_BUTTON3_RESET)
 
@@ -99,17 +96,11 @@ K_EVENT_DEFINE(app_events);
 /* error code bits */
 #define APP_ERROR_NONE              0U
 #define APP_ERROR_GPIO_INIT         BIT(0)
-#define APP_ERROR_ADC_INIT          BIT(1)
 #define APP_ERROR_ADC_READ          BIT(2)
-#define APP_ERROR_ADC_CONVERT       BIT(3)
-#define APP_ERROR_PWM_INIT          BIT(4)
-#define APP_ERROR_PWM_SET           BIT(5)
 #define APP_ERROR_I2C_INIT          BIT(6)
 #define APP_ERROR_I2C_READ          BIT(7)
 #define APP_ERROR_BLE_INIT          BIT(8)
-#define APP_ERROR_BLE_NOTIFY        BIT(9)
 #define APP_ERROR_LOW_BATTERY       BIT(10)
-#define APP_ERROR_UNKNOWN           BIT(31)
 
 /* helper timing functions */
 
@@ -117,19 +108,6 @@ static inline uint64_t now_ns(void)
 {
     int64_t ticks = k_uptime_ticks();
     return k_ticks_to_ns_near64(ticks);
-}
-
-static int clamp_mv(int32_t mv)
-{
-    if (mv < 0) return 0;
-    if (mv > ADC_MAX_MV) return ADC_MAX_MV;
-    return mv;
-}
-
-static uint8_t map_mv_to_duty(int32_t mv)
-{
-    int32_t mv_clamped = clamp_mv(mv);
-    return (uint8_t)((mv_clamped * 100) / ADC_MAX_MV);
 }
 
 static uint8_t map_mv_to_percent(int32_t mv)
@@ -216,7 +194,6 @@ struct app_object {
     size_t ecg_buf_index;
 
     uint32_t error_code;
-    bool terminate_requested;
     bool error_state_active;
     bool error_blink_on;
 
@@ -228,6 +205,9 @@ struct app_object {
 
     bool idle_active;
     bool low_power_requested;
+
+    uint8_t led1_duty_percent;
+    bool led1_pwm_on;
 };
 
 static struct app_object s_obj;
@@ -235,7 +215,6 @@ static const struct smf_state app_states[];
 
 /* SMF helper prototypes */
 static int init_app_object(struct app_object *s);
-static void set_led1(bool on);
 static void post_error(struct app_object *s, uint32_t error_bit);
 static void clear_error(struct app_object *s);
 
@@ -275,16 +254,18 @@ static void ble_update_temperature(int32_t temp_centi_c);
 static void ble_update_error(uint32_t error_code);
 
 static void idle_exit(void *o);
-static void battery_exit(void *o);
-static void temperature_exit(void *o);
-
 static void enter_low_power_mode(void);
+
+static int set_led1_pwm(uint8_t duty_percent);
+static void stop_led1_pwm(void);
+void led1_pwm_timer_handler(struct k_timer *t);
 
 K_TIMER_DEFINE(ecg_sample_timer, ecg_sample_timer_handler, ecg_sample_timer_stop_fn);
 K_TIMER_DEFINE(error_blink_timer, error_blink_timer_handler, NULL);
 K_TIMER_DEFINE(error_timeout_timer, error_timeout_timer_handler, NULL);
 K_TIMER_DEFINE(battery_timer, battery_timer_handler, NULL);
 K_TIMER_DEFINE(hr_led_timer, hr_led_timer_handler, NULL);
+K_TIMER_DEFINE(led1_pwm_timer, led1_pwm_timer_handler, NULL);
 
 /* SMF state handlers */
 static enum smf_state_result init_run(void *o);
@@ -313,6 +294,7 @@ static void enter_low_power_mode(void)
     k_timer_stop(&error_blink_timer);
     k_timer_stop(&error_timeout_timer);
     k_timer_stop(&hr_led_timer);
+    stop_led1_pwm();
 
     (void)set_led2_duty_cycle(0U);
     (void)set_led3_duty_cycle(0U);
@@ -334,18 +316,6 @@ static void idle_exit(void *o)
     s->idle_active = false;
 }
 
-static void battery_exit(void *o)
-{
-    struct app_object *s = (struct app_object *)o;
-    s->idle_active = false;
-}
-
-static void temperature_exit(void *o)
-{
-    struct app_object *s = (struct app_object *)o;
-    s->idle_active = false;
-}
-
 static int ble_init_wrapper(void)
 {
     int ret = bluetooth_init(&bluetooth_callbacks, &remote_service_callbacks);
@@ -359,6 +329,10 @@ static int ble_init_wrapper(void)
     return 0;
 }
 
+/*
+ * ble-lib.c expects raw battery millivolts and normalizes internally.
+ * Temperature and error characteristics are exposed through globals.
+ */
 static void ble_update_battery_mv(int32_t battery_mv)
 {
     bluetooth_set_battery_level(battery_mv);
@@ -511,17 +485,32 @@ static int mcp9808_read_temp(int32_t *temp_centi_c)
     return 0;
 }
 
-static int set_led1_pwm(uint8_t percent)
+static int set_led1_pwm(uint8_t duty_percent)
 {
-    /*
-     * For now: simple threshold mapping (clean + deterministic).
-     * Later commit can upgrade to software PWM if desired.
-     */
-    if (percent == 0) {
+    if (duty_percent > 100U) {
+        duty_percent = 100U;
+    }
+
+    s_obj.led1_duty_percent = duty_percent;
+
+    if (duty_percent == 0U) {
+        stop_led1_pwm();
         return gpio_pin_set_dt(&iv_pump_led, 0);
     }
 
-    return gpio_pin_set_dt(&iv_pump_led, 1);
+    if (duty_percent == 100U) {
+        k_timer_stop(&led1_pwm_timer);
+        s_obj.led1_pwm_on = true;
+        return gpio_pin_set_dt(&iv_pump_led, 1);
+    }
+
+    s_obj.led1_pwm_on = true;
+    gpio_pin_set_dt(&iv_pump_led, 1);
+
+    uint32_t on_ms = (LED1_SW_PWM_PERIOD_MS * duty_percent) / 100U;
+    k_timer_start(&led1_pwm_timer, K_MSEC(on_ms), K_NO_WAIT);
+
+    return 0;
 }
 
 static int setup_adc_single(void)
@@ -595,11 +584,8 @@ static void clear_error(struct app_object *s)
     if (s != NULL) {
         s->error_code = APP_ERROR_NONE;
     }
-}
 
-static void set_led1(bool on)
-{
-    gpio_pin_set_dt(&iv_pump_led, on ? 1 : 0);
+    errors.events = APP_ERROR_NONE;
 }
 
 static void set_error_blink_outputs(bool on)
@@ -636,7 +622,6 @@ static int init_app_object(struct app_object *s)
     memset(s->ecg_buf, 0, sizeof(s->ecg_buf));
 
     s->error_code = APP_ERROR_NONE;
-    s->terminate_requested = false;
     s->error_state_active = false;
     s->error_blink_on = false;
 
@@ -648,6 +633,9 @@ static int init_app_object(struct app_object *s)
 
     s->idle_active = false;
     s->low_power_requested = false;
+
+    s->led1_duty_percent = 0U;
+    s->led1_pwm_on = false;
 
     return 0;
 }
@@ -769,14 +757,13 @@ static enum smf_state_result init_run(void *o)
     return SMF_EVENT_HANDLED;
 }
 
- static void idle_entry(void *o)
+static void idle_entry(void *o)
 {
     struct app_object *s = (struct app_object *)o;
 
     s->idle_active = true;
 
     gpio_pin_set_dt(&error_led, 0);
-    set_led1(false);
 
     s->ecg_active = false;
 
@@ -868,7 +855,6 @@ static void battery_entry(void *o)
                 s->battery_percent,
                 BATTERY_LOW_THRESHOLD_PCT);
 
-        s->terminate_requested = true;
         s->low_power_requested = true;
         smf_set_terminate(SMF_CTX(s), -EFAULT);
         return;
@@ -993,7 +979,7 @@ static enum smf_state_result ecg_run(void *o)
         s->ecg_mv = sample_mv;
 
         if (s->ecg_buf_index < ECG_BUF_LEN) {
-            s->ecg_buf[s->ecg_buf_index] = (int16_t)clamp_mv(sample_mv);
+            s->ecg_buf[s->ecg_buf_index] = (int16_t)sample_mv;
             s->ecg_buf_index++;
             s->ecg_sample_count++;
         }
@@ -1034,6 +1020,7 @@ static void error_entry(void *o)
     s->error_blink_on = false;
 
     stop_hr_led(s);
+    stop_led1_pwm();
 
     disable_measurement_button_interrupts();
 
@@ -1072,7 +1059,6 @@ static enum smf_state_result error_run(void *o)
     }
 
     if (events & APP_EVENT_ERROR_TIMEOUT) {
-        s->terminate_requested = true;
         s->low_power_requested = true;
         LOG_ERR("ERROR timeout reached; requesting graceful termination");
         smf_set_terminate(SMF_CTX(s), -ETIMEDOUT);
@@ -1081,8 +1067,6 @@ static enum smf_state_result error_run(void *o)
 
     if (events & APP_EVENT_BUTTON3_RESET) {
         clear_error(s);
-        ble_update_error(0);
-        s->terminate_requested = false;
         smf_set_state(SMF_CTX(s), &app_states[STATE_IDLE]);
         return SMF_EVENT_HANDLED;
     }
@@ -1106,8 +1090,8 @@ static void error_exit(void *o)
 static const struct smf_state app_states[] = {
     [STATE_INIT]        = SMF_CREATE_STATE(NULL,              init_run,         NULL,             NULL, NULL),
     [STATE_IDLE]        = SMF_CREATE_STATE(idle_entry,        idle_run,         idle_exit,        NULL, NULL),
-    [STATE_BATTERY]     = SMF_CREATE_STATE(battery_entry,     battery_run,      battery_exit,     NULL, NULL),
-    [STATE_TEMPERATURE] = SMF_CREATE_STATE(temperature_entry, temperature_run,  temperature_exit, NULL, NULL),
+    [STATE_BATTERY]     = SMF_CREATE_STATE(battery_entry,     battery_run,      NULL,             NULL, NULL),
+    [STATE_TEMPERATURE] = SMF_CREATE_STATE(temperature_entry, temperature_run,  NULL,             NULL, NULL),
     [STATE_ECG]         = SMF_CREATE_STATE(ecg_entry,         ecg_run,          ecg_exit,         NULL, NULL),
     [STATE_ERROR]       = SMF_CREATE_STATE(error_entry,       error_run,        error_exit,       NULL, NULL),
 };
@@ -1197,12 +1181,10 @@ static int do_single_sample(struct app_object *s)
     }
 
     s->adc_mv = val_mv;
-    uint8_t duty = map_mv_to_duty(s->adc_mv);
 
-    LOG_INF("ADC raw=%d, mv=%d, LED2 duty=%d%%",
-            s->adc_raw,
-            s->adc_mv,
-            duty);
+    LOG_INF("ADC raw=%d, mv=%d",
+        s->adc_raw,
+        s->adc_mv);
 
     return 0;
 }
@@ -1276,6 +1258,38 @@ void ecg_sample_timer_handler(struct k_timer *t)
 void ecg_sample_timer_stop_fn(struct k_timer *t)
 {
     ARG_UNUSED(t);
+}
+
+static void stop_led1_pwm(void)
+{
+    k_timer_stop(&led1_pwm_timer);
+    s_obj.led1_pwm_on = false;
+    s_obj.led1_duty_percent = 0U;
+    (void)gpio_pin_set_dt(&iv_pump_led, 0);
+}
+
+void led1_pwm_timer_handler(struct k_timer *t)
+{
+    ARG_UNUSED(t);
+
+    uint8_t duty = s_obj.led1_duty_percent;
+
+    if (duty == 0U || duty >= 100U) {
+        return;
+    }
+
+    uint32_t on_ms = (LED1_SW_PWM_PERIOD_MS * duty) / 100U;
+    uint32_t off_ms = LED1_SW_PWM_PERIOD_MS - on_ms;
+
+    if (s_obj.led1_pwm_on) {
+        s_obj.led1_pwm_on = false;
+        (void)gpio_pin_set_dt(&iv_pump_led, 0);
+        k_timer_start(&led1_pwm_timer, K_MSEC(off_ms), K_NO_WAIT);
+    } else {
+        s_obj.led1_pwm_on = true;
+        (void)gpio_pin_set_dt(&iv_pump_led, 1);
+        k_timer_start(&led1_pwm_timer, K_MSEC(on_ms), K_NO_WAIT);
+    }
 }
 
 void error_blink_timer_handler(struct k_timer *t)
