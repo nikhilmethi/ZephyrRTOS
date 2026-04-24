@@ -10,6 +10,8 @@
 #include <zephyr/drivers/pwm.h> // CONFIG_PWM=y
 #include "ble-lib.h" // BME554 BLE library (remember to add to CMakeLists.txt)
 #include <string.h>
+#include <zephyr/drivers/i2c.h>
+#include <stdlib.h>
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 #define ADC_DT_SPEC_GET_BY_ALIAS(adc_alias)                    \
@@ -18,6 +20,11 @@ LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
     .channel_id = DT_REG_ADDR(DT_ALIAS(adc_alias)),            \
     ADC_CHANNEL_CFG_FROM_DT_NODE(DT_ALIAS(adc_alias))          \
 }
+
+#define MCP9808_I2C_ADDR 0x18
+#define MCP9808_REG_TEMP 0x05
+
+static const struct device *i2c_dev = DEVICE_DT_GET(DT_NODELABEL(i2c0));
 
 /* macros */
 #define HEARTBEAT_HALF_PERIOD_MS 500
@@ -31,10 +38,6 @@ LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 #define BATTERY_SAMPLE_INTERVAL_MS (60U * 1000U)
 #define BATTERY_MAX_MV            3000
 #define BATTERY_LOW_THRESHOLD_PCT 75U
-
-#define SIN_SAMPLE_INTERVAL_US 2500      // 400 Hz
-#define SIN_DURATION_MS        2000   // 2 seconds
-#define SIN_NUM_SAMPLES        (SIN_DURATION_MS * 1000 / SIN_SAMPLE_INTERVAL_US)
 
 #define LED_PWM_PERIOD_NS PWM_USEC(1000)
 
@@ -111,22 +114,6 @@ static uint8_t map_mv_to_duty(int32_t mv)
 {
     int32_t mv_clamped = clamp_mv(mv);
     return (uint8_t)((mv_clamped * 100) / ADC_MAX_MV);
-}
-
-#define SIN_INPUT_MIN_MV 650
-#define SIN_INPUT_MAX_MV 2650
-
-static uint8_t map_diff_mv_to_duty(int32_t mv)
-{
-    if (mv < SIN_INPUT_MIN_MV) {
-        mv = SIN_INPUT_MIN_MV;
-    }
-    if (mv > SIN_INPUT_MAX_MV) {
-        mv = SIN_INPUT_MAX_MV;
-    }
-
-    return (uint8_t)(((mv - SIN_INPUT_MIN_MV) * 100) /
-                     (SIN_INPUT_MAX_MV - SIN_INPUT_MIN_MV));
 }
 
 static uint8_t map_mv_to_percent(int32_t mv)
@@ -235,14 +222,18 @@ static int set_led3_duty_cycle(uint8_t duty_percent);
 
 static int do_single_sample(struct app_object *s);
 static int do_diff_single_sample(int32_t *mv_out);
+void sin_sample_timer_handler(struct k_timer *t);
+void sin_sample_timer_stop_fn(struct k_timer *t);
 
 static void set_error_blink_outputs(bool on);
 void error_blink_timer_handler(struct k_timer *t);
 void error_timeout_timer_handler(struct k_timer *t);
 
-static uint8_t map_mv_to_percent(int32_t mv);
 static int set_led1_pwm(uint8_t percent);
 void battery_timer_handler(struct k_timer *t);
+
+static int mcp9808_init(void);
+static int mcp9808_read_temp(int32_t *temp_centi_c);
 
 K_TIMER_DEFINE(sin_sample_timer, sin_sample_timer_handler, sin_sample_timer_stop_fn);
 K_TIMER_DEFINE(error_blink_timer, error_blink_timer_handler, NULL);
@@ -268,6 +259,46 @@ static void ecg_exit(void *o);
 static void error_entry(void *o);
 static enum smf_state_result error_run(void *o);
 static void error_exit(void *o);
+
+static int mcp9808_init(void)
+{
+    if (!device_is_ready(i2c_dev)) {
+        LOG_ERR("I2C device not ready");
+        return -ENODEV;
+    }
+
+    return 0;
+}
+
+static int mcp9808_read_temp(int32_t *temp_centi_c)
+{
+    uint8_t reg = MCP9808_REG_TEMP;
+    uint8_t buf[2];
+
+    int ret = i2c_write_read(i2c_dev,
+                             MCP9808_I2C_ADDR,
+                             &reg, 1,
+                             buf, 2);
+    if (ret < 0) {
+        LOG_ERR("I2C read failed (%d)", ret);
+        return ret;
+    }
+
+    int16_t raw = ((buf[0] << 8) | buf[1]) & 0x1FFF;
+
+    /* sign extend if negative */
+    if (raw & 0x1000) {
+        raw |= 0xE000;
+    }
+
+    /*
+     * MCP9808 resolution: 0.0625°C per LSB
+     * Convert to centi-degrees C (×100)
+     */
+    *temp_centi_c = (raw * 625) / 100;
+
+    return 0;
+}
 
 static int set_led1_pwm(uint8_t percent)
 {
@@ -399,7 +430,7 @@ static int init_app_object(struct app_object *s)
 static enum smf_state_result init_run(void *o)
 {
     struct app_object *s = (struct app_object *)o;
-    int err;
+    int err, ret;
 
     if (!device_is_ready(sleep_button.port)) {
         LOG_ERR("gpio0 interface not ready.");
@@ -459,6 +490,13 @@ static enum smf_state_result init_run(void *o)
 
     err = setup_adc_diff();
     if (err < 0) {
+        smf_set_state(SMF_CTX(s), &app_states[STATE_ERROR]);
+        return SMF_EVENT_HANDLED;
+    }
+
+    ret = mcp9808_init();
+    if (ret < 0) {
+        post_error(s, APP_ERROR_I2C_INIT);
         smf_set_state(SMF_CTX(s), &app_states[STATE_ERROR]);
         return SMF_EVENT_HANDLED;
     }
@@ -609,14 +647,24 @@ static enum smf_state_result battery_run(void *o)
 static void temperature_entry(void *o)
 {
     struct app_object *s = (struct app_object *)o;
+    int ret;
 
     disable_measurement_button_interrupts();
 
+    ret = mcp9808_read_temp(&s->temperature_centi_c);
+    if (ret < 0) {
+        post_error(s, APP_ERROR_I2C_READ);
+        smf_set_state(SMF_CTX(s), &app_states[STATE_ERROR]);
+        return;
+    }
+
+    LOG_INF("Temperature: %d.%02d C",
+            s->temperature_centi_c / 100,
+            abs(s->temperature_centi_c % 100));
+
     /*
-     * Placeholder for Commit 5.
-     * This state will read MCP9808 temperature over I2C and notify over BLE.
+     * BLE notification will be added later.
      */
-    LOG_INF("TEMPERATURE state placeholder");
 
     smf_set_state(SMF_CTX(s), &app_states[STATE_IDLE]);
 }
