@@ -225,6 +225,9 @@ struct app_object {
     uint32_t hr_led_period_ms;
     uint32_t hr_led_on_ms;
     uint32_t hr_led_off_ms;
+
+    bool idle_active;
+    bool low_power_requested;
 };
 
 static struct app_object s_obj;
@@ -271,6 +274,12 @@ static void ble_update_battery_mv(int32_t battery_mv);
 static void ble_update_temperature(int32_t temp_centi_c);
 static void ble_update_error(uint32_t error_code);
 
+static void idle_exit(void *o);
+static void battery_exit(void *o);
+static void temperature_exit(void *o);
+
+static void enter_low_power_mode(void);
+
 K_TIMER_DEFINE(ecg_sample_timer, ecg_sample_timer_handler, ecg_sample_timer_stop_fn);
 K_TIMER_DEFINE(error_blink_timer, error_blink_timer_handler, NULL);
 K_TIMER_DEFINE(error_timeout_timer, error_timeout_timer_handler, NULL);
@@ -296,6 +305,46 @@ static void ecg_exit(void *o);
 static void error_entry(void *o);
 static enum smf_state_result error_run(void *o);
 static void error_exit(void *o);
+
+static void enter_low_power_mode(void)
+{
+    k_timer_stop(&battery_timer);
+    k_timer_stop(&ecg_sample_timer);
+    k_timer_stop(&error_blink_timer);
+    k_timer_stop(&error_timeout_timer);
+    k_timer_stop(&hr_led_timer);
+
+    (void)set_led2_duty_cycle(0U);
+    (void)set_led3_duty_cycle(0U);
+
+    (void)gpio_pin_set_dt(&heartbeat_led, 0);
+    (void)gpio_pin_set_dt(&iv_pump_led, 0);
+    (void)gpio_pin_set_dt(&error_led, 0);
+
+    LOG_INF("Entering low-power terminal state");
+
+    while (1) {
+        k_sleep(K_FOREVER);
+    }
+}
+
+static void idle_exit(void *o)
+{
+    struct app_object *s = (struct app_object *)o;
+    s->idle_active = false;
+}
+
+static void battery_exit(void *o)
+{
+    struct app_object *s = (struct app_object *)o;
+    s->idle_active = false;
+}
+
+static void temperature_exit(void *o)
+{
+    struct app_object *s = (struct app_object *)o;
+    s->idle_active = false;
+}
 
 static int ble_init_wrapper(void)
 {
@@ -409,11 +458,6 @@ static int process_ecg_window(struct app_object *s)
         LOG_WRN("Unable to update LED2 HR blink timing (%d)", ret);
         return ret;
     }
-
-    /*
-     * Heart Rate BLE update will be added in Commit 8.
-     * LED2 25%% duty blinking will be added in Commit 7.
-     */
 
     return 0;
 }
@@ -602,6 +646,9 @@ static int init_app_object(struct app_object *s)
     s->hr_led_on_ms = 0U;
     s->hr_led_off_ms = 0U;
 
+    s->idle_active = false;
+    s->low_power_requested = false;
+
     return 0;
 }
 
@@ -679,6 +726,8 @@ static enum smf_state_result init_run(void *o)
         return SMF_EVENT_HANDLED;
     }
 
+    k_event_init(&errors);
+
     ret = ble_init_wrapper();
     if (ret < 0) {
         post_error(s, APP_ERROR_BLE_INIT);
@@ -713,7 +762,7 @@ static enum smf_state_result init_run(void *o)
     }
 
     k_timer_start(&battery_timer,
-              K_NO_WAIT,
+              K_MSEC(10),
               K_MSEC(BATTERY_SAMPLE_INTERVAL_MS));
 
     smf_set_state(SMF_CTX(s), &app_states[STATE_IDLE]);
@@ -723,6 +772,8 @@ static enum smf_state_result init_run(void *o)
  static void idle_entry(void *o)
 {
     struct app_object *s = (struct app_object *)o;
+
+    s->idle_active = true;
 
     gpio_pin_set_dt(&error_led, 0);
     set_led1(false);
@@ -818,6 +869,7 @@ static void battery_entry(void *o)
                 BATTERY_LOW_THRESHOLD_PCT);
 
         s->terminate_requested = true;
+        s->low_power_requested = true;
         smf_set_terminate(SMF_CTX(s), -EFAULT);
         return;
     }
@@ -924,6 +976,8 @@ static enum smf_state_result ecg_run(void *o)
         LOG_INF("Temperature during ECG: %d.%02d C",
                 s->temperature_centi_c / 100,
                 abs(s->temperature_centi_c % 100));
+
+        ble_update_temperature(s->temperature_centi_c);
     }
 
     if (events & APP_EVENT_ECG_SAMPLE) {
@@ -939,7 +993,7 @@ static enum smf_state_result ecg_run(void *o)
         s->ecg_mv = sample_mv;
 
         if (s->ecg_buf_index < ECG_BUF_LEN) {
-            s->ecg_buf[s->ecg_buf_index] = (int16_t)sample_mv;
+            s->ecg_buf[s->ecg_buf_index] = (int16_t)clamp_mv(sample_mv);
             s->ecg_buf_index++;
             s->ecg_sample_count++;
         }
@@ -1019,6 +1073,7 @@ static enum smf_state_result error_run(void *o)
 
     if (events & APP_EVENT_ERROR_TIMEOUT) {
         s->terminate_requested = true;
+        s->low_power_requested = true;
         LOG_ERR("ERROR timeout reached; requesting graceful termination");
         smf_set_terminate(SMF_CTX(s), -ETIMEDOUT);
         return SMF_EVENT_HANDLED;
@@ -1026,6 +1081,7 @@ static enum smf_state_result error_run(void *o)
 
     if (events & APP_EVENT_BUTTON3_RESET) {
         clear_error(s);
+        ble_update_error(0);
         s->terminate_requested = false;
         smf_set_state(SMF_CTX(s), &app_states[STATE_IDLE]);
         return SMF_EVENT_HANDLED;
@@ -1048,12 +1104,12 @@ static void error_exit(void *o)
 }
 
 static const struct smf_state app_states[] = {
-    [STATE_INIT]        = SMF_CREATE_STATE(NULL,              init_run,         NULL,      NULL, NULL),
-    [STATE_IDLE]        = SMF_CREATE_STATE(idle_entry,        idle_run,         NULL,      NULL, NULL),
-    [STATE_BATTERY]     = SMF_CREATE_STATE(battery_entry,     battery_run,      NULL,      NULL, NULL),
-    [STATE_TEMPERATURE] = SMF_CREATE_STATE(temperature_entry, temperature_run,  NULL,      NULL, NULL),
-    [STATE_ECG]         = SMF_CREATE_STATE(ecg_entry,         ecg_run,          ecg_exit,  NULL, NULL),
-    [STATE_ERROR]       = SMF_CREATE_STATE(error_entry,       error_run,        error_exit,NULL, NULL),
+    [STATE_INIT]        = SMF_CREATE_STATE(NULL,              init_run,         NULL,             NULL, NULL),
+    [STATE_IDLE]        = SMF_CREATE_STATE(idle_entry,        idle_run,         idle_exit,        NULL, NULL),
+    [STATE_BATTERY]     = SMF_CREATE_STATE(battery_entry,     battery_run,      battery_exit,     NULL, NULL),
+    [STATE_TEMPERATURE] = SMF_CREATE_STATE(temperature_entry, temperature_run,  temperature_exit, NULL, NULL),
+    [STATE_ECG]         = SMF_CREATE_STATE(ecg_entry,         ecg_run,          ecg_exit,         NULL, NULL),
+    [STATE_ERROR]       = SMF_CREATE_STATE(error_entry,       error_run,        error_exit,       NULL, NULL),
 };
 
 int main(void)
@@ -1073,6 +1129,10 @@ int main(void)
             LOG_ERR("terminating state machine (%d)", ret);
             break;
         }
+    }
+
+    if (s_obj.low_power_requested) {
+        enter_low_power_mode();
     }
 
     return ret;
@@ -1236,7 +1296,9 @@ void battery_timer_handler(struct k_timer *t)
 {
     ARG_UNUSED(t);
 
-    k_event_post(&app_events, APP_EVENT_BATTERY_SAMPLE);
+    if (s_obj.idle_active) {
+        k_event_post(&app_events, APP_EVENT_BATTERY_SAMPLE);
+    }
 }
 
 void hr_led_timer_handler(struct k_timer *t)
