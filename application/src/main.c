@@ -41,6 +41,14 @@ static const struct device *i2c_dev = DEVICE_DT_GET(DT_NODELABEL(i2c0));
 
 #define LED_PWM_PERIOD_NS PWM_USEC(1000)
 
+#define ECG_SAMPLE_INTERVAL_US 2500U   // 400 Hz
+#define ECG_WINDOW_MS          2000U
+#define ECG_SAMPLE_RATE_HZ     400.0
+#define ECG_BUF_LEN            ((ECG_WINDOW_MS * 1000U) / ECG_SAMPLE_INTERVAL_US)
+
+#define ECG_MIN_BPM            40U
+#define ECG_MAX_BPM            200U
+
 extern void heartbeat_thread(void *, void *, void *);
 
 /* heartbeat thread */
@@ -196,6 +204,8 @@ struct app_object {
     uint16_t heart_rate_bpm;
     uint16_t heart_rate_avg_bpm;
     uint32_t ecg_sample_count;
+    int16_t ecg_buf[ECG_BUF_LEN];
+    size_t ecg_buf_index;
 
     uint32_t error_code;
     bool terminate_requested;
@@ -222,8 +232,6 @@ static int set_led3_duty_cycle(uint8_t duty_percent);
 
 static int do_single_sample(struct app_object *s);
 static int do_diff_single_sample(int32_t *mv_out);
-void sin_sample_timer_handler(struct k_timer *t);
-void sin_sample_timer_stop_fn(struct k_timer *t);
 
 static void set_error_blink_outputs(bool on);
 void error_blink_timer_handler(struct k_timer *t);
@@ -235,7 +243,12 @@ void battery_timer_handler(struct k_timer *t);
 static int mcp9808_init(void);
 static int mcp9808_read_temp(int32_t *temp_centi_c);
 
-K_TIMER_DEFINE(sin_sample_timer, sin_sample_timer_handler, sin_sample_timer_stop_fn);
+void ecg_sample_timer_handler(struct k_timer *t);
+void ecg_sample_timer_stop_fn(struct k_timer *t);
+static int read_ecg_sample_mv(int32_t *mv_out);
+static int process_ecg_window(struct app_object *s);
+
+K_TIMER_DEFINE(ecg_sample_timer, ecg_sample_timer_handler, ecg_sample_timer_stop_fn);
 K_TIMER_DEFINE(error_blink_timer, error_blink_timer_handler, NULL);
 K_TIMER_DEFINE(error_timeout_timer, error_timeout_timer_handler, NULL);
 K_TIMER_DEFINE(battery_timer, battery_timer_handler, NULL);
@@ -259,6 +272,54 @@ static void ecg_exit(void *o);
 static void error_entry(void *o);
 static enum smf_state_result error_run(void *o);
 static void error_exit(void *o);
+
+static int process_ecg_window(struct app_object *s)
+{
+    double freq_hz;
+    double bpm_d;
+
+    if (s == NULL) {
+        return -EINVAL;
+    }
+
+    freq_hz = calc_freq_zero_crossing(s->ecg_buf,
+                                      ECG_BUF_LEN,
+                                      ECG_SAMPLE_RATE_HZ);
+
+    if (freq_hz <= 0.0) {
+        return -EINVAL;
+    }
+
+    bpm_d = freq_hz * 60.0;
+
+    if (bpm_d < ECG_MIN_BPM || bpm_d > ECG_MAX_BPM) {
+        LOG_WRN("ECG BPM out of expected range: %.1f", bpm_d);
+        return -ERANGE;
+    }
+
+    s->heart_rate_bpm = (uint16_t)(bpm_d + 0.5);
+    s->heart_rate_avg_bpm = s->heart_rate_bpm;
+
+    LOG_INF("ECG: freq=%.2f Hz, HR=%u BPM",
+            freq_hz,
+            s->heart_rate_avg_bpm);
+
+    /*
+     * Heart Rate BLE update will be added in Commit 8.
+     * LED2 25%% duty blinking will be added in Commit 7.
+     */
+
+    return 0;
+}
+
+static int read_ecg_sample_mv(int32_t *mv_out)
+{
+    if (mv_out == NULL) {
+        return -EINVAL;
+    }
+
+    return do_diff_single_sample(mv_out);
+}
 
 static int mcp9808_init(void)
 {
@@ -359,11 +420,14 @@ static void enable_button_interrupts(void)
 static void disable_measurement_button_interrupts(void)
 {
     /*
-     * Keep BUTTON3/reset enabled. Later, when BUTTON0 is added explicitly,
-     * it will also remain enabled during measurement states.
+     * BUTTON1 remains enabled for temperature during ECG.
+     * BUTTON2 remains enabled to stop ECG.
+     * BUTTON3 remains enabled for reset.
+     *
+     * BUTTON0 will be added explicitly later.
      */
-    (void)gpio_pin_interrupt_configure_dt(&sleep_button, GPIO_INT_DISABLE);
-    (void)gpio_pin_interrupt_configure_dt(&freq_up_button, GPIO_INT_DISABLE);
+    (void)gpio_pin_interrupt_configure_dt(&sleep_button, GPIO_INT_EDGE_TO_ACTIVE);
+    (void)gpio_pin_interrupt_configure_dt(&freq_up_button, GPIO_INT_EDGE_TO_ACTIVE);
     (void)gpio_pin_interrupt_configure_dt(&reset_button, GPIO_INT_EDGE_TO_ACTIVE);
 }
 
@@ -418,6 +482,8 @@ static int init_app_object(struct app_object *s)
     s->heart_rate_bpm = 0U;
     s->heart_rate_avg_bpm = 0U;
     s->ecg_sample_count = 0U;
+    s->ecg_buf_index = 0U;
+    memset(s->ecg_buf, 0, sizeof(s->ecg_buf));
 
     s->error_code = APP_ERROR_NONE;
     s->terminate_requested = false;
@@ -683,19 +749,92 @@ static void ecg_entry(void *o)
 
     s->ecg_active = true;
     s->ecg_sample_count = 0U;
+    s->ecg_buf_index = 0U;
+    memset(s->ecg_buf, 0, sizeof(s->ecg_buf));
 
-    /*
-     * Placeholder for Commit 6.
-     * This state will start ECG sampling and calculate average heart rate.
-     */
-    LOG_INF("ECG state placeholder: live ECG measurements active");
+    k_event_clear(&app_events, APP_EVENT_ECG_SAMPLE);
 
-    smf_set_state(SMF_CTX(s), &app_states[STATE_IDLE]);
+    k_timer_start(&ecg_sample_timer,
+                  K_USEC(ECG_SAMPLE_INTERVAL_US),
+                  K_USEC(ECG_SAMPLE_INTERVAL_US));
+
+    LOG_INF("ECG: started live sampling at %.1f Hz", ECG_SAMPLE_RATE_HZ);
 }
 
 static enum smf_state_result ecg_run(void *o)
 {
-    ARG_UNUSED(o);
+    struct app_object *s = (struct app_object *)o;
+
+    uint32_t events = k_event_wait(&app_events,
+                                   APP_EVENT_ECG_SAMPLE |
+                                   APP_EVENT_BUTTON2_ECG |
+                                   APP_EVENT_BUTTON1_TEMP |
+                                   APP_EVENT_BUTTON3_RESET |
+                                   APP_EVENT_ERROR,
+                                   true,
+                                   K_FOREVER);
+
+    if (events & APP_EVENT_ERROR) {
+        smf_set_state(SMF_CTX(s), &app_states[STATE_ERROR]);
+        return SMF_EVENT_HANDLED;
+    }
+
+    if (events & APP_EVENT_BUTTON3_RESET) {
+        s->ecg_active = false;
+        (void)set_led2_duty_cycle(0);
+        smf_set_state(SMF_CTX(s), &app_states[STATE_IDLE]);
+        return SMF_EVENT_HANDLED;
+    }
+
+    if (events & APP_EVENT_BUTTON2_ECG) {
+        s->ecg_active = false;
+        LOG_INF("ECG: stopped by BUTTON2");
+        smf_set_state(SMF_CTX(s), &app_states[STATE_IDLE]);
+        return SMF_EVENT_HANDLED;
+    }
+
+    if (events & APP_EVENT_BUTTON1_TEMP) {
+        int ret = mcp9808_read_temp(&s->temperature_centi_c);
+        if (ret < 0) {
+            post_error(s, APP_ERROR_I2C_READ);
+            smf_set_state(SMF_CTX(s), &app_states[STATE_ERROR]);
+            return SMF_EVENT_HANDLED;
+        }
+
+        LOG_INF("Temperature during ECG: %d.%02d C",
+                s->temperature_centi_c / 100,
+                abs(s->temperature_centi_c % 100));
+    }
+
+    if (events & APP_EVENT_ECG_SAMPLE) {
+        int32_t sample_mv;
+        int ret = read_ecg_sample_mv(&sample_mv);
+
+        if (ret < 0) {
+            post_error(s, APP_ERROR_ADC_READ);
+            smf_set_state(SMF_CTX(s), &app_states[STATE_ERROR]);
+            return SMF_EVENT_HANDLED;
+        }
+
+        s->ecg_mv = sample_mv;
+
+        if (s->ecg_buf_index < ECG_BUF_LEN) {
+            s->ecg_buf[s->ecg_buf_index] = (int16_t)sample_mv;
+            s->ecg_buf_index++;
+            s->ecg_sample_count++;
+        }
+
+        if (s->ecg_buf_index >= ECG_BUF_LEN) {
+            ret = process_ecg_window(s);
+            if (ret < 0) {
+                LOG_WRN("ECG: unable to calculate valid heart rate from current window");
+            }
+
+            s->ecg_buf_index = 0U;
+            memset(s->ecg_buf, 0, sizeof(s->ecg_buf));
+        }
+    }
+
     return SMF_EVENT_HANDLED;
 }
 
@@ -703,8 +842,12 @@ static void ecg_exit(void *o)
 {
     struct app_object *s = (struct app_object *)o;
 
+    k_timer_stop(&ecg_sample_timer);
+    k_event_clear(&app_events, APP_EVENT_ECG_SAMPLE);
+
     s->ecg_active = false;
-    LOG_INF("Exited ECG state");
+
+    LOG_INF("ECG: exited");
 }
 
 static void error_entry(void *o)
@@ -942,14 +1085,14 @@ void freq_up_button_callback(const struct device *dev, struct gpio_callback *cb,
     k_event_post(&app_events, APP_EVENT_BUTTON2_ECG);
 }
 
-void sin_sample_timer_handler(struct k_timer *t)
+void ecg_sample_timer_handler(struct k_timer *t)
 {
     ARG_UNUSED(t);
 
     k_event_post(&app_events, APP_EVENT_ECG_SAMPLE);
 }
 
-void sin_sample_timer_stop_fn(struct k_timer *t)
+void ecg_sample_timer_stop_fn(struct k_timer *t)
 {
     ARG_UNUSED(t);
 }
