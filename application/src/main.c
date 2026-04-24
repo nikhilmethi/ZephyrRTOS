@@ -6,9 +6,10 @@
 #include <zephyr/sys/atomic.h>
 #include <zephyr/smf.h> 
 #include <zephyr/drivers/adc.h> 
-// // #include "calc_freq.h"
+#include "calc_freq.h"
 #include <zephyr/drivers/pwm.h> // CONFIG_PWM=y
-// #include "ble-lib.h" // BME554 BLE library (remember to add to CMakeLists.txt)
+#include "ble-lib.h" // BME554 BLE library (remember to add to CMakeLists.txt)
+#include <string.h>
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 #define ADC_DT_SPEC_GET_BY_ALIAS(adc_alias)                    \
@@ -43,16 +44,47 @@ K_THREAD_DEFINE(heartbeat_thread_id,
                 HEARTBEAT_THREAD_PRIO, 0, 0);
 
 /* button events (main-facing) */
-#define BTN_SINGLE_SAMPLE_EVENT BIT(0)
-#define BTN_RESET_EVENT         BIT(1)
-#define BTN_SINUSOID_EVENT      BIT(2)
-#define SIN_SAMPLE_EVENT        BIT(3)
+/* application events */
+#define APP_EVENT_BUTTON0_IDLE      BIT(0)
+#define APP_EVENT_BUTTON1_TEMP      BIT(1)
+#define APP_EVENT_BUTTON2_ECG       BIT(2)
+#define APP_EVENT_BUTTON3_RESET     BIT(3)
+#define APP_EVENT_BATTERY_SAMPLE    BIT(4)
+#define APP_EVENT_ECG_SAMPLE        BIT(5)
+#define APP_EVENT_ERROR             BIT(6)
+#define APP_EVENT_ERROR_TIMEOUT     BIT(7)
 
-#define BTN_EVENT_MASK          (BTN_SINGLE_SAMPLE_EVENT | \
-                                 BTN_RESET_EVENT         | \
-                                 BTN_SINUSOID_EVENT)
+#define APP_BUTTON_EVENT_MASK       (APP_EVENT_BUTTON0_IDLE | \
+                                     APP_EVENT_BUTTON1_TEMP | \
+                                     APP_EVENT_BUTTON2_ECG | \
+                                     APP_EVENT_BUTTON3_RESET)
 
-K_EVENT_DEFINE(button_events);
+#define APP_MEASUREMENT_EVENT_MASK  (APP_EVENT_BATTERY_SAMPLE | \
+                                     APP_EVENT_ECG_SAMPLE)
+
+#define APP_SYSTEM_EVENT_MASK       (APP_EVENT_ERROR | \
+                                     APP_EVENT_ERROR_TIMEOUT)
+
+#define APP_EVENT_MASK              (APP_BUTTON_EVENT_MASK | \
+                                     APP_MEASUREMENT_EVENT_MASK | \
+                                     APP_SYSTEM_EVENT_MASK)
+
+K_EVENT_DEFINE(app_events);
+
+/* error code bits */
+#define APP_ERROR_NONE              0U
+#define APP_ERROR_GPIO_INIT         BIT(0)
+#define APP_ERROR_ADC_INIT          BIT(1)
+#define APP_ERROR_ADC_READ          BIT(2)
+#define APP_ERROR_ADC_CONVERT       BIT(3)
+#define APP_ERROR_PWM_INIT          BIT(4)
+#define APP_ERROR_PWM_SET           BIT(5)
+#define APP_ERROR_I2C_INIT          BIT(6)
+#define APP_ERROR_I2C_READ          BIT(7)
+#define APP_ERROR_BLE_INIT          BIT(8)
+#define APP_ERROR_BLE_NOTIFY        BIT(9)
+#define APP_ERROR_LOW_BATTERY       BIT(10)
+#define APP_ERROR_UNKNOWN           BIT(31)
 
 /* helper timing functions */
 
@@ -139,8 +171,9 @@ static struct gpio_callback freq_up_button_cb;
 enum app_state {
     STATE_INIT,
     STATE_IDLE,
-    STATE_SINGLE_SAMPLE,
-    STATE_SINUSOID,
+    STATE_BATTERY,
+    STATE_TEMPERATURE,
+    STATE_ECG,
     STATE_ERROR,
 };
 
@@ -152,9 +185,19 @@ struct app_object {
     int16_t adc_raw;
     int32_t adc_mv;
 
-    uint32_t sin_sample_count;
-    bool sin_active;
-    int32_t sin_mv;
+    uint8_t battery_percent;
+    int32_t battery_mv;
+
+    int32_t temperature_centi_c;
+
+    bool ecg_active;
+    int32_t ecg_mv;
+    uint16_t heart_rate_bpm;
+    uint16_t heart_rate_avg_bpm;
+    uint32_t ecg_sample_count;
+
+    uint32_t error_code;
+    bool terminate_requested;
 };
 
 static struct app_object s_obj;
@@ -174,6 +217,8 @@ static int set_led3_duty_cycle(uint8_t duty_percent);
 static int do_diff_single_sample(int32_t *mv_out);
 void sin_sample_timer_handler(struct k_timer *t);
 void sin_sample_timer_stop_fn(struct k_timer *t);
+static void post_error(struct app_object *s, uint32_t error_bit);
+static void clear_error(struct app_object *s);
 
 K_TIMER_DEFINE(sin_sample_timer, sin_sample_timer_handler, sin_sample_timer_stop_fn);
 
@@ -235,19 +280,41 @@ static void sinusoid_exit(void *o);
 static int init_app_object(struct app_object *s)
 {
     if (s == NULL) {
-        return -1;
+        return -EINVAL;
     }
 
-    s->hb_last_ns = 0;
+    memset(s, 0, sizeof(*s));
 
-    s->adc_raw = 0;
-    s->adc_mv = 0;
+    s->battery_percent = 0U;
+    s->battery_mv = 0;
+    s->temperature_centi_c = 0;
 
-    s->sin_sample_count = 0;
-    s->sin_active = false;
-    s->sin_mv = 0;
+    s->ecg_active = false;
+    s->ecg_mv = 0;
+    s->heart_rate_bpm = 0U;
+    s->heart_rate_avg_bpm = 0U;
+    s->ecg_sample_count = 0U;
+
+    s->error_code = APP_ERROR_NONE;
+    s->terminate_requested = false;
 
     return 0;
+}
+
+static void post_error(struct app_object *s, uint32_t error_bit)
+{
+    if (s != NULL) {
+        s->error_code |= error_bit;
+    }
+
+    k_event_post(&app_events, APP_EVENT_ERROR);
+}
+
+static void clear_error(struct app_object *s)
+{
+    if (s != NULL) {
+        s->error_code = APP_ERROR_NONE;
+    }
 }
 
 static void set_led1(bool on)
@@ -315,7 +382,7 @@ static enum smf_state_result init_run(void *o)
     err = gpio_add_callback_dt(&freq_up_button, &freq_up_button_cb);
     if (err < 0) { LOG_ERR("Cannot add freq_up button callback."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
 
-    k_event_clear(&button_events, BTN_EVENT_MASK);
+    k_event_clear(&app_events, APP_EVENT_MASK);
 
     k_thread_name_set(heartbeat_thread_id, "heartbeat");
 
@@ -376,11 +443,11 @@ static void idle_entry(void *o)
 static enum smf_state_result idle_run(void *o)
 {
     struct app_object *s = (struct app_object *)o;
-    uint32_t events = k_event_wait(&button_events, BTN_EVENT_MASK, true, K_FOREVER);
+    uint32_t events = k_event_wait(&app_events, BTN_EVENT_MASK, true, K_FOREVER);
 
     LOG_INF("Button Event Posted: %u", events);
 
-    if (events & BTN_RESET_EVENT) {
+    if (events & APP_EVENT_BUTTON3_RESET) {
         int ret;
 
         ret = set_led2_duty_cycle(0);
@@ -462,7 +529,7 @@ static void sinusoid_entry(void *o)
     s->sin_active = true;
     s->sin_mv = 0;
 
-    k_event_clear(&button_events, SIN_SAMPLE_EVENT);
+    k_event_clear(&app_events, SIN_SAMPLE_EVENT);
 
     k_timer_start(&sin_sample_timer,
                   K_USEC(SIN_SAMPLE_INTERVAL_US),
@@ -475,12 +542,12 @@ static enum smf_state_result sinusoid_run(void *o)
 {
     struct app_object *s = o;
 
-    uint32_t events = k_event_wait(&button_events,
-                                   BTN_RESET_EVENT | SIN_SAMPLE_EVENT,
+    uint32_t events = k_event_wait(&app_events,
+                                   APP_EVENT_BUTTON3_RESET | SIN_SAMPLE_EVENT,
                                    true,
                                    K_FOREVER);
 
-    if (events & BTN_RESET_EVENT) {
+    if (events & APP_EVENT_BUTTON3_RESET) {
         s->sin_active = false;
         LOG_INF("Sinusoidal PWM interrupted by reset");
         smf_set_state(SMF_CTX(s), &app_states[STATE_IDLE]);
@@ -535,7 +602,7 @@ static void sinusoid_exit(void *o)
     ARG_UNUSED(s);
 
     k_timer_stop(&sin_sample_timer);
-    k_event_clear(&button_events, SIN_SAMPLE_EVENT);
+    k_event_clear(&app_events, SIN_SAMPLE_EVENT);
     (void)set_led3_duty_cycle(0);
     LOG_INF("Sinusoid mode exited");
 }
@@ -559,7 +626,7 @@ static void error_entry(void *o)
 static enum smf_state_result error_run(void *o)
 {
     struct app_object *s = (struct app_object *)o;
-    uint32_t events = k_event_wait(&button_events, BTN_RESET_EVENT, true, K_FOREVER);
+    uint32_t events = k_event_wait(&app_events, APP_EVENT_BUTTON3_RESET, true, K_FOREVER);
 
     LOG_INF("Button Event Posted: %u", events);
     smf_set_state(SMF_CTX(s), &app_states[STATE_IDLE]);
@@ -708,7 +775,8 @@ void sleep_button_callback(const struct device *dev, struct gpio_callback *cb, u
     ARG_UNUSED(dev);
     ARG_UNUSED(cb);
     ARG_UNUSED(pins);
-    k_event_post(&button_events, BTN_SINGLE_SAMPLE_EVENT);
+
+    k_event_post(&app_events, APP_EVENT_BUTTON1_TEMP);
 }
 
 void reset_button_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
@@ -716,7 +784,8 @@ void reset_button_callback(const struct device *dev, struct gpio_callback *cb, u
     ARG_UNUSED(dev);
     ARG_UNUSED(cb);
     ARG_UNUSED(pins);
-    k_event_post(&button_events, BTN_RESET_EVENT);
+
+    k_event_post(&app_events, APP_EVENT_BUTTON3_RESET);
 }
 
 void freq_up_button_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
@@ -724,13 +793,15 @@ void freq_up_button_callback(const struct device *dev, struct gpio_callback *cb,
     ARG_UNUSED(dev);
     ARG_UNUSED(cb);
     ARG_UNUSED(pins);
-    k_event_post(&button_events, BTN_SINUSOID_EVENT);
+
+    k_event_post(&app_events, APP_EVENT_BUTTON2_ECG);
 }
 
 void sin_sample_timer_handler(struct k_timer *t)
 {
     ARG_UNUSED(t);
-    k_event_post(&button_events, SIN_SAMPLE_EVENT);
+
+    k_event_post(&app_events, APP_EVENT_ECG_SAMPLE);
 }
 
 void sin_sample_timer_stop_fn(struct k_timer *t)
