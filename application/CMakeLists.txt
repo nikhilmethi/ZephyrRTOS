@@ -15,4 +15,5 @@ set(NO_BUILD_TYPE_WARNING TRUE)
 target_sources(app PRIVATE
     src/main.c
     src/calc_freq.c
+    src/ble-lib.c
 )

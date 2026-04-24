@@ -21,6 +21,9 @@ LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
     ADC_CHANNEL_CFG_FROM_DT_NODE(DT_ALIAS(adc_alias))          \
 }
 
+int32_t temperature_degC = 0;
+struct k_event errors;
+
 #define MCP9808_I2C_ADDR 0x18
 #define MCP9808_REG_TEMP 0x05
 
@@ -263,6 +266,11 @@ static int update_hr_led_timing(struct app_object *s, uint16_t bpm);
 static void stop_hr_led(struct app_object *s);
 void hr_led_timer_handler(struct k_timer *t);
 
+static int ble_init_wrapper(void);
+static void ble_update_battery_mv(int32_t battery_mv);
+static void ble_update_temperature(int32_t temp_centi_c);
+static void ble_update_error(uint32_t error_code);
+
 K_TIMER_DEFINE(ecg_sample_timer, ecg_sample_timer_handler, ecg_sample_timer_stop_fn);
 K_TIMER_DEFINE(error_blink_timer, error_blink_timer_handler, NULL);
 K_TIMER_DEFINE(error_timeout_timer, error_timeout_timer_handler, NULL);
@@ -288,6 +296,34 @@ static void ecg_exit(void *o);
 static void error_entry(void *o);
 static enum smf_state_result error_run(void *o);
 static void error_exit(void *o);
+
+static int ble_init_wrapper(void)
+{
+    int ret = bluetooth_init(&bluetooth_callbacks, &remote_service_callbacks);
+
+    if (ret < 0) {
+        LOG_ERR("Bluetooth init failed (%d)", ret);
+        return ret;
+    }
+
+    LOG_INF("Bluetooth initialized");
+    return 0;
+}
+
+static void ble_update_battery_mv(int32_t battery_mv)
+{
+    bluetooth_set_battery_level(battery_mv);
+}
+
+static void ble_update_temperature(int32_t temp_centi_c)
+{
+    temperature_degC = temp_centi_c / 100;
+}
+
+static void ble_update_error(uint32_t error_code)
+{
+    errors.events = error_code;
+}
 
 static int update_hr_led_timing(struct app_object *s, uint16_t bpm)
 {
@@ -643,6 +679,13 @@ static enum smf_state_result init_run(void *o)
         return SMF_EVENT_HANDLED;
     }
 
+    ret = ble_init_wrapper();
+    if (ret < 0) {
+        post_error(s, APP_ERROR_BLE_INIT);
+        smf_set_state(SMF_CTX(s), &app_states[STATE_ERROR]);
+        return SMF_EVENT_HANDLED;
+    }
+
     if (!device_is_ready(led2_pwm.dev)) {
         LOG_ERR("LED2 PWM device not ready");
         smf_set_state(SMF_CTX(s), &app_states[STATE_ERROR]);
@@ -757,6 +800,8 @@ static void battery_entry(void *o)
     LOG_INF("Battery: %d mV (%u%%)",
             s->battery_mv,
             s->battery_percent);
+    
+    ble_update_battery_mv(s->battery_mv);
 
     ret = set_led1_pwm(s->battery_percent);
     if (ret < 0) {
@@ -804,9 +849,7 @@ static void temperature_entry(void *o)
             s->temperature_centi_c / 100,
             abs(s->temperature_centi_c % 100));
 
-    /*
-     * BLE notification will be added later.
-     */
+    ble_update_temperature(s->temperature_centi_c);
 
     smf_set_state(SMF_CTX(s), &app_states[STATE_IDLE]);
 }
@@ -952,9 +995,7 @@ static void error_entry(void *o)
 
     LOG_ERR("Entered ERROR state with error_code=0x%08x", s->error_code);
 
-    /*
-     * BLE error notification will be added in the BLE commit.
-     */
+    ble_update_error(s->error_code);
 }
 
 static enum smf_state_result error_run(void *o)
