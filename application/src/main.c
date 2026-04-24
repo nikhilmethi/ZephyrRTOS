@@ -28,6 +28,9 @@ LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 #define HEARTBEAT_THREAD_PRIO 5
 
 #define ADC_MAX_MV 3000
+#define BATTERY_SAMPLE_INTERVAL_MS (60U * 1000U)
+#define BATTERY_MAX_MV            3000
+#define BATTERY_LOW_THRESHOLD_PCT 75U
 
 #define SIN_SAMPLE_INTERVAL_US 2500      // 400 Hz
 #define SIN_DURATION_MS        2000   // 2 seconds
@@ -124,6 +127,14 @@ static uint8_t map_diff_mv_to_duty(int32_t mv)
 
     return (uint8_t)(((mv - SIN_INPUT_MIN_MV) * 100) /
                      (SIN_INPUT_MAX_MV - SIN_INPUT_MIN_MV));
+}
+
+static uint8_t map_mv_to_percent(int32_t mv)
+{
+    if (mv < 0) return 0;
+    if (mv > BATTERY_MAX_MV) mv = BATTERY_MAX_MV;
+
+    return (uint8_t)((mv * 100) / BATTERY_MAX_MV);
 }
 
 /* hardware definitions */
@@ -229,9 +240,14 @@ static void set_error_blink_outputs(bool on);
 void error_blink_timer_handler(struct k_timer *t);
 void error_timeout_timer_handler(struct k_timer *t);
 
+static uint8_t map_mv_to_percent(int32_t mv);
+static int set_led1_pwm(uint8_t percent);
+void battery_timer_handler(struct k_timer *t);
+
 K_TIMER_DEFINE(sin_sample_timer, sin_sample_timer_handler, sin_sample_timer_stop_fn);
 K_TIMER_DEFINE(error_blink_timer, error_blink_timer_handler, NULL);
 K_TIMER_DEFINE(error_timeout_timer, error_timeout_timer_handler, NULL);
+K_TIMER_DEFINE(battery_timer, battery_timer_handler, NULL);
 
 /* SMF state handlers */
 static enum smf_state_result init_run(void *o);
@@ -252,6 +268,19 @@ static void ecg_exit(void *o);
 static void error_entry(void *o);
 static enum smf_state_result error_run(void *o);
 static void error_exit(void *o);
+
+static int set_led1_pwm(uint8_t percent)
+{
+    /*
+     * For now: simple threshold mapping (clean + deterministic).
+     * Later commit can upgrade to software PWM if desired.
+     */
+    if (percent == 0) {
+        return gpio_pin_set_dt(&iv_pump_led, 0);
+    }
+
+    return gpio_pin_set_dt(&iv_pump_led, 1);
+}
 
 static int setup_adc_single(void)
 {
@@ -460,6 +489,10 @@ static enum smf_state_result init_run(void *o)
         return SMF_EVENT_HANDLED;
     }
 
+    k_timer_start(&battery_timer,
+              K_NO_WAIT,
+              K_MSEC(BATTERY_SAMPLE_INTERVAL_MS));
+
     smf_set_state(SMF_CTX(s), &app_states[STATE_IDLE]);
     return SMF_EVENT_HANDLED;
 }
@@ -527,15 +560,42 @@ static enum smf_state_result idle_run(void *o)
 static void battery_entry(void *o)
 {
     struct app_object *s = (struct app_object *)o;
+    int ret;
 
     disable_measurement_button_interrupts();
 
-    /*
-     * Placeholder for Commit 4.
-     * This state will measure AIN0, update battery_percent,
-     * update LED1 brightness, and check the low-battery threshold.
-     */
-    LOG_INF("BATTERY state placeholder");
+    ret = do_single_sample(s);
+    if (ret < 0) {
+        post_error(s, APP_ERROR_ADC_READ);
+        smf_set_state(SMF_CTX(s), &app_states[STATE_ERROR]);
+        return;
+    }
+
+    s->battery_mv = s->adc_mv;
+    s->battery_percent = map_mv_to_percent(s->battery_mv);
+
+    LOG_INF("Battery: %d mV (%u%%)",
+            s->battery_mv,
+            s->battery_percent);
+
+    ret = set_led1_pwm(s->battery_percent);
+    if (ret < 0) {
+        post_error(s, APP_ERROR_GPIO_INIT);
+        smf_set_state(SMF_CTX(s), &app_states[STATE_ERROR]);
+        return;
+    }
+
+    if (s->battery_percent < BATTERY_LOW_THRESHOLD_PCT) {
+        post_error(s, APP_ERROR_LOW_BATTERY);
+
+        LOG_ERR("Battery below threshold (%u%% < %u%%). Terminating.",
+                s->battery_percent,
+                BATTERY_LOW_THRESHOLD_PCT);
+
+        s->terminate_requested = true;
+        smf_set_terminate(SMF_CTX(s), -EFAULT);
+        return;
+    }
 
     smf_set_state(SMF_CTX(s), &app_states[STATE_IDLE]);
 }
@@ -858,6 +918,13 @@ void error_timeout_timer_handler(struct k_timer *t)
     ARG_UNUSED(t);
 
     k_event_post(&app_events, APP_EVENT_ERROR_TIMEOUT);
+}
+
+void battery_timer_handler(struct k_timer *t)
+{
+    ARG_UNUSED(t);
+
+    k_event_post(&app_events, APP_EVENT_BATTERY_SAMPLE);
 }
 
 /* threads */
