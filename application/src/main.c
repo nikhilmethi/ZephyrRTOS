@@ -49,6 +49,11 @@ static const struct device *i2c_dev = DEVICE_DT_GET(DT_NODELABEL(i2c0));
 #define ECG_MIN_BPM            40U
 #define ECG_MAX_BPM            200U
 
+#define HR_LED_MIN_BPM 40U
+#define HR_LED_MAX_BPM 200U
+#define HR_LED_DUTY_PERCENT 25U
+#define MS_PER_MINUTE 60000U
+
 extern void heartbeat_thread(void *, void *, void *);
 
 /* heartbeat thread */
@@ -211,6 +216,12 @@ struct app_object {
     bool terminate_requested;
     bool error_state_active;
     bool error_blink_on;
+
+    bool hr_led_active;
+    bool hr_led_on;
+    uint32_t hr_led_period_ms;
+    uint32_t hr_led_on_ms;
+    uint32_t hr_led_off_ms;
 };
 
 static struct app_object s_obj;
@@ -248,10 +259,15 @@ void ecg_sample_timer_stop_fn(struct k_timer *t);
 static int read_ecg_sample_mv(int32_t *mv_out);
 static int process_ecg_window(struct app_object *s);
 
+static int update_hr_led_timing(struct app_object *s, uint16_t bpm);
+static void stop_hr_led(struct app_object *s);
+void hr_led_timer_handler(struct k_timer *t);
+
 K_TIMER_DEFINE(ecg_sample_timer, ecg_sample_timer_handler, ecg_sample_timer_stop_fn);
 K_TIMER_DEFINE(error_blink_timer, error_blink_timer_handler, NULL);
 K_TIMER_DEFINE(error_timeout_timer, error_timeout_timer_handler, NULL);
 K_TIMER_DEFINE(battery_timer, battery_timer_handler, NULL);
+K_TIMER_DEFINE(hr_led_timer, hr_led_timer_handler, NULL);
 
 /* SMF state handlers */
 static enum smf_state_result init_run(void *o);
@@ -273,10 +289,58 @@ static void error_entry(void *o);
 static enum smf_state_result error_run(void *o);
 static void error_exit(void *o);
 
+static int update_hr_led_timing(struct app_object *s, uint16_t bpm)
+{
+    if (s == NULL) {
+        return -EINVAL;
+    }
+
+    if (bpm < HR_LED_MIN_BPM || bpm > HR_LED_MAX_BPM) {
+        return -ERANGE;
+    }
+
+    s->hr_led_period_ms = MS_PER_MINUTE / bpm;
+    s->hr_led_on_ms = (s->hr_led_period_ms * HR_LED_DUTY_PERCENT) / 100U;
+    s->hr_led_off_ms = s->hr_led_period_ms - s->hr_led_on_ms;
+
+    if (s->hr_led_on_ms == 0U || s->hr_led_off_ms == 0U) {
+        return -EINVAL;
+    }
+
+    s->hr_led_active = true;
+    s->hr_led_on = true;
+
+    (void)set_led2_duty_cycle(100U);
+
+    k_timer_start(&hr_led_timer,
+                  K_MSEC(s->hr_led_on_ms),
+                  K_NO_WAIT);
+
+    LOG_INF("LED2 HR blink: bpm=%u period=%u ms on=%u ms off=%u ms",
+            bpm,
+            s->hr_led_period_ms,
+            s->hr_led_on_ms,
+            s->hr_led_off_ms);
+
+    return 0;
+}
+
+static void stop_hr_led(struct app_object *s)
+{
+    if (s != NULL) {
+        s->hr_led_active = false;
+        s->hr_led_on = false;
+    }
+
+    k_timer_stop(&hr_led_timer);
+    (void)set_led2_duty_cycle(0U);
+}
+
 static int process_ecg_window(struct app_object *s)
 {
     double freq_hz;
     double bpm_d;
+    int ret;
 
     if (s == NULL) {
         return -EINVAL;
@@ -303,6 +367,12 @@ static int process_ecg_window(struct app_object *s)
     LOG_INF("ECG: freq=%.2f Hz, HR=%u BPM",
             freq_hz,
             s->heart_rate_avg_bpm);
+
+    ret = update_hr_led_timing(s, s->heart_rate_avg_bpm);
+    if (ret < 0) {
+        LOG_WRN("Unable to update LED2 HR blink timing (%d)", ret);
+        return ret;
+    }
 
     /*
      * Heart Rate BLE update will be added in Commit 8.
@@ -490,6 +560,12 @@ static int init_app_object(struct app_object *s)
     s->error_state_active = false;
     s->error_blink_on = false;
 
+    s->hr_led_active = false;
+    s->hr_led_on = false;
+    s->hr_led_period_ms = 0U;
+    s->hr_led_on_ms = 0U;
+    s->hr_led_off_ms = 0U;
+
     return 0;
 }
 
@@ -635,7 +711,7 @@ static enum smf_state_result idle_run(void *o)
         clear_error(s);
         s->ecg_active = false;
 
-        (void)set_led2_duty_cycle(0);
+        stop_hr_led(s);
         (void)set_led3_duty_cycle(0);
 
         LOG_INF("BUTTON3 reset from IDLE: stored measurements preserved");
@@ -781,7 +857,7 @@ static enum smf_state_result ecg_run(void *o)
 
     if (events & APP_EVENT_BUTTON3_RESET) {
         s->ecg_active = false;
-        (void)set_led2_duty_cycle(0);
+        stop_hr_led(s);
         smf_set_state(SMF_CTX(s), &app_states[STATE_IDLE]);
         return SMF_EVENT_HANDLED;
     }
@@ -789,6 +865,7 @@ static enum smf_state_result ecg_run(void *o)
     if (events & APP_EVENT_BUTTON2_ECG) {
         s->ecg_active = false;
         LOG_INF("ECG: stopped by BUTTON2");
+        stop_hr_led(s);
         smf_set_state(SMF_CTX(s), &app_states[STATE_IDLE]);
         return SMF_EVENT_HANDLED;
     }
@@ -846,6 +923,7 @@ static void ecg_exit(void *o)
     k_event_clear(&app_events, APP_EVENT_ECG_SAMPLE);
 
     s->ecg_active = false;
+    stop_hr_led(s);
 
     LOG_INF("ECG: exited");
 }
@@ -857,6 +935,8 @@ static void error_entry(void *o)
     s->ecg_active = false;
     s->error_state_active = true;
     s->error_blink_on = false;
+
+    stop_hr_led(s);
 
     disable_measurement_button_interrupts();
 
@@ -1116,6 +1196,31 @@ void battery_timer_handler(struct k_timer *t)
     ARG_UNUSED(t);
 
     k_event_post(&app_events, APP_EVENT_BATTERY_SAMPLE);
+}
+
+void hr_led_timer_handler(struct k_timer *t)
+{
+    ARG_UNUSED(t);
+
+    if (!s_obj.hr_led_active) {
+        return;
+    }
+
+    if (s_obj.hr_led_on) {
+        s_obj.hr_led_on = false;
+        (void)set_led2_duty_cycle(0U);
+
+        k_timer_start(&hr_led_timer,
+                      K_MSEC(s_obj.hr_led_off_ms),
+                      K_NO_WAIT);
+    } else {
+        s_obj.hr_led_on = true;
+        (void)set_led2_duty_cycle(100U);
+
+        k_timer_start(&hr_led_timer,
+                      K_MSEC(s_obj.hr_led_on_ms),
+                      K_NO_WAIT);
+    }
 }
 
 /* threads */
