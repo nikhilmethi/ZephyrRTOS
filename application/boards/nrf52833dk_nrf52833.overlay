@@ -11,7 +11,7 @@
 
 		sleepbutton = &button0;
 		frequpbutton = &button1;
-		freqdownbutton = &button2;
+		idlebutton = &button2;
 		resetbutton = &button3;
 
 		vadc-single = &vadc_single;
@@ -81,4 +81,32 @@
 			low-power-enable;
 		};
 	};
+};
+
+&i2c0 {
+    status = "okay";
+    clock-frequency = <I2C_BITRATE_STANDARD>;
+    pinctrl-0 = <&i2c0_default>;
+    pinctrl-1 = <&i2c0_sleep>;
+    pinctrl-names = "default", "sleep";
+};
+
+&pinctrl {
+    /* existing pwm0 blocks stay here, just add i2c0 below */
+
+    i2c0_default: i2c0_default {
+        group1 {
+            psels = <NRF_PSEL(TWIM_SDA, 0, 26)>,
+                    <NRF_PSEL(TWIM_SCL, 0, 27)>;
+            bias-pull-up;
+        };
+    };
+
+    i2c0_sleep: i2c0_sleep {
+        group1 {
+            psels = <NRF_PSEL(TWIM_SDA, 0, 26)>,
+                    <NRF_PSEL(TWIM_SCL, 0, 27)>;
+            low-power-enable;
+        };
+    };
 };

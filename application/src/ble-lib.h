@@ -12,6 +12,12 @@
 #include <zephyr/bluetooth/services/bas.h> // Battery Service
 #include <zephyr/bluetooth/services/hrs.h> // Heart Rate Service
 
+/* in ble-lib.h */
+#define NOMINAL_BATTERY_VOLT_MV  3000
+
+void ble_notify_temperature(void);
+void ble_notify_error(void);
+
 /* UUID of the Remote Service */
 // Project ID: 065 (3rd entry)
 // MFG ID = 0x02DF (4th entry)

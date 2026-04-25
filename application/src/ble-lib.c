@@ -105,8 +105,6 @@ void on_notif_changed(enum bt_data_notifications_enabled status) {
     }
 }
 
-const struct bt_gatt_attr *attr = &remote_srv.attrs[2];
-
 void ccc_cfg_changed_cb(const struct bt_gatt_attr *attr, uint16_t value) {
     bool notif_enabled = (value == BT_GATT_CCC_NOTIFY);
     LOG_INF("Notifications: %s", notif_enabled? "enabled":"disabled");
@@ -168,7 +166,8 @@ int bluetooth_init(struct bt_conn_cb *bt_cb, struct bt_remote_srv_cb *remote_cb)
     if (IS_ENABLED(CONFIG_BT_SETTINGS)) {
         settings_load();
     }
-    ret = bt_le_adv_start(BT_LE_ADV_CONN, ad, ARRAY_SIZE(ad), sd, ARRAY_SIZE(sd));
+
+    ret = bt_le_adv_start(BT_LE_ADV_CONN_FAST_2, ad, ARRAY_SIZE(ad), sd, ARRAY_SIZE(sd));
     if (ret) {
         LOG_ERR("Could not start advertising (ret = %d)", ret);
         return ret;
@@ -193,5 +192,55 @@ void bluetooth_set_battery_level(int32_t raw_mV) {
     int err = bt_bas_set_battery_level((int)normalized_level);
     if (err) {
         LOG_ERR("BAS set error (err = %d)", err);
+    }
+}
+
+/* Use BT_GATT_ATTR_FIND_BY_UUID for robust lookups, or define
+ * stable pointers directly from the service table.
+ * The safest portable approach is to cache attr pointers at
+ * service definition time via BT_GATT_CHARACTERISTIC macros.
+ * Here we use symbolic offsets matching the service definition:
+ *
+ *   attrs[0]  = primary service
+ *   attrs[1]  = temperature characteristic declaration
+ *   attrs[2]  = temperature characteristic value      <-- notify here
+ *   attrs[3]  = temperature CCC
+ *   attrs[4]  = error characteristic declaration
+ *   attrs[5]  = error characteristic value            <-- notify here
+ *   attrs[6]  = error CCC
+ *   attrs[7]  = message characteristic declaration
+ *   attrs[8]  = message characteristic value
+ *   attrs[9]  = message CCC
+ */
+#define REMOTE_SRV_TEMP_ATTR_IDX   2
+#define REMOTE_SRV_ERR_ATTR_IDX    5
+
+void ble_notify_temperature(void)
+{
+    if (notifications_enabled != BT_DATA_NOTIFICATIONS_ENABLED || !current_conn) {
+        return;
+    }
+
+    int ret = bt_gatt_notify(current_conn,
+                             &remote_srv.attrs[REMOTE_SRV_TEMP_ATTR_IDX],
+                             &temperature_degC,
+                             sizeof(temperature_degC));
+    if (ret < 0) {
+        LOG_WRN("Temperature notify failed (%d)", ret);
+    }
+}
+
+void ble_notify_error(void)
+{
+    if (notifications_enabled != BT_DATA_NOTIFICATIONS_ENABLED || !current_conn) {
+        return;
+    }
+
+    int ret = bt_gatt_notify(current_conn,
+                             &remote_srv.attrs[REMOTE_SRV_ERR_ATTR_IDX],
+                             &errors.events,
+                             sizeof(errors.events));
+    if (ret < 0) {
+        LOG_WRN("Error notify failed (%d)", ret);
     }
 }
