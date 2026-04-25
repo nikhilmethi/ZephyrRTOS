@@ -11,6 +11,7 @@
 #include <string.h>
 #include <zephyr/drivers/i2c.h>
 #include <stdlib.h>
+#include <zephyr/sys/atomic.h>
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 #define ADC_DT_SPEC_GET_BY_ALIAS(adc_alias)                    \
@@ -28,6 +29,14 @@ struct k_event errors;
 
 static const struct device *i2c_dev = DEVICE_DT_GET(DT_NODELABEL(i2c0));
 
+static struct k_work_delayable hr_led_work;
+static struct k_work_delayable button0_debounce_work;
+static struct k_work_delayable button1_debounce_work;
+static struct k_work_delayable button2_debounce_work;
+static struct k_work_delayable button3_debounce_work;
+static struct k_work ble_hr_notify_work;
+static struct k_work ble_temp_notify_work;
+static struct k_work ble_error_notify_work;
 /* macros */
 #define HEARTBEAT_HALF_PERIOD_MS 500
 #define ERROR_BLINK_HALF_PERIOD_MS 500
@@ -60,6 +69,8 @@ static const struct device *i2c_dev = DEVICE_DT_GET(DT_NODELABEL(i2c0));
 #define HR_LED_DUTY_PERCENT 25U
 #define MS_PER_MINUTE 60000U
 
+#define BUTTON_DEBOUNCE_MS 50U
+
 extern void heartbeat_thread(void *, void *, void *);
 
 /* heartbeat thread */
@@ -79,7 +90,6 @@ K_THREAD_DEFINE(heartbeat_thread_id,
 #define APP_EVENT_ERROR             BIT(6)
 #define APP_EVENT_ERROR_TIMEOUT     BIT(7)
 #define APP_EVENT_ERROR_BLINK       BIT(8)
-#define APP_EVENT_HR_LED_TOGGLE     BIT(9)  /* FIX 3: deferred PWM toggle from timer ISR */
 
 #define APP_BUTTON_EVENT_MASK       (APP_EVENT_BUTTON0_IDLE | \
                                      APP_EVENT_BUTTON1_TEMP | \
@@ -91,8 +101,7 @@ K_THREAD_DEFINE(heartbeat_thread_id,
 
 #define APP_SYSTEM_EVENT_MASK       (APP_EVENT_ERROR        | \
                                      APP_EVENT_ERROR_TIMEOUT | \
-                                     APP_EVENT_ERROR_BLINK  | \
-                                     APP_EVENT_HR_LED_TOGGLE)
+                                     APP_EVENT_ERROR_BLINK)
 
 #define APP_EVENT_MASK              (APP_BUTTON_EVENT_MASK     | \
                                      APP_MEASUREMENT_EVENT_MASK | \
@@ -228,6 +237,7 @@ struct app_object {
 };
 
 static struct app_object s_obj;
+static atomic_t atomic_error_flags;
 static const struct smf_state app_states[];
 
 /* SMF helper prototypes */
@@ -258,13 +268,18 @@ static int mcp9808_read_temp(int32_t *temp_centi_c);
 
 void ecg_sample_timer_handler(struct k_timer *t);
 void ecg_sample_timer_stop_fn(struct k_timer *t);
-static int read_ecg_sample_mv(int32_t *mv_out);
 static int process_ecg_window(struct app_object *s);
 
 static int update_hr_led_timing(struct app_object *s, uint16_t bpm);
 static void stop_hr_led(struct app_object *s);
-void hr_led_timer_handler(struct k_timer *t);
-
+static void hr_led_work_handler(struct k_work *work);
+static void button0_debounce_handler(struct k_work *work);
+static void button1_debounce_handler(struct k_work *work);
+static void button2_debounce_handler(struct k_work *work);
+static void button3_debounce_handler(struct k_work *work);
+static void ble_hr_notify_handler(struct k_work *work);
+static void ble_temp_notify_handler(struct k_work *work);
+static void ble_error_notify_handler(struct k_work *work);
 static int ble_init_wrapper(void);
 static void ble_update_battery_mv(int32_t battery_mv);
 static void ble_update_temperature(int32_t temp_centi_c);
@@ -282,8 +297,10 @@ K_TIMER_DEFINE(ecg_sample_timer, ecg_sample_timer_handler, ecg_sample_timer_stop
 K_TIMER_DEFINE(error_blink_timer, error_blink_timer_handler, NULL);
 K_TIMER_DEFINE(error_timeout_timer, error_timeout_timer_handler, NULL);
 K_TIMER_DEFINE(battery_timer, battery_timer_handler, NULL);
-K_TIMER_DEFINE(hr_led_timer, hr_led_timer_handler, NULL);
 K_TIMER_DEFINE(led1_pwm_timer, led1_pwm_timer_handler, NULL);
+
+#define ECG_MSGQ_DEPTH 16
+K_MSGQ_DEFINE(ecg_msgq, sizeof(int32_t), ECG_MSGQ_DEPTH, 4);
 
 /* SMF state handlers */
 static enum smf_state_result init_run(void *o);
@@ -311,7 +328,7 @@ static void enter_low_power_mode(void)
     k_timer_stop(&ecg_sample_timer);
     k_timer_stop(&error_blink_timer);
     k_timer_stop(&error_timeout_timer);
-    k_timer_stop(&hr_led_timer);
+    k_work_cancel_delayable(&hr_led_work);
     stop_led1_pwm();
 
     (void)set_led2_duty_cycle(0U);
@@ -369,12 +386,9 @@ static void ble_update_error(uint32_t error_code)
  */
 static void ble_update_heart_rate(uint16_t bpm)
 {
-    int ret = bt_hrs_notify(bpm);
-    if (ret < 0) {
-        LOG_WRN("HRS notify failed (%d)", ret);
-    } else {
-        LOG_INF("HRS notify: %u BPM", bpm);
-    }
+    ARG_UNUSED(bpm);
+    /* bpm is already stored in s_obj.heart_rate_avg_bpm by process_ecg_window */
+    k_work_submit(&ble_hr_notify_work);
 }
 
 static int update_hr_led_timing(struct app_object *s, uint16_t bpm)
@@ -400,9 +414,7 @@ static int update_hr_led_timing(struct app_object *s, uint16_t bpm)
 
     (void)set_led2_duty_cycle(100U);
 
-    k_timer_start(&hr_led_timer,
-                  K_MSEC(s->hr_led_on_ms),
-                  K_NO_WAIT);
+    k_work_reschedule(&hr_led_work, K_MSEC(s->hr_led_on_ms));
 
     LOG_INF("LED2 HR blink: bpm=%u period=%u ms on=%u ms off=%u ms",
             bpm,
@@ -420,7 +432,7 @@ static void stop_hr_led(struct app_object *s)
         s->hr_led_on = false;
     }
 
-    k_timer_stop(&hr_led_timer);
+    k_work_cancel_delayable(&hr_led_work);
     (void)set_led2_duty_cycle(0U);
 }
 
@@ -489,15 +501,6 @@ static int process_ecg_window(struct app_object *s)
     ble_update_heart_rate(s->heart_rate_avg_bpm);
 
     return update_hr_led_timing(s, s->heart_rate_avg_bpm);
-}
-
-static int read_ecg_sample_mv(int32_t *mv_out)
-{
-    if (mv_out == NULL) {
-        return -EINVAL;
-    }
-
-    return do_diff_single_sample(mv_out);
 }
 
 static int mcp9808_read_temp(int32_t *temp_centi_c)
@@ -619,8 +622,10 @@ static void disable_measurement_button_interrupts(void)
 
 static void post_error(struct app_object *s, uint32_t error_bit)
 {
+    atomic_or(&atomic_error_flags, (atomic_val_t)error_bit);
+
     if (s != NULL) {
-        s->error_code |= error_bit;
+        s->error_code = (uint32_t)atomic_get(&atomic_error_flags);
     }
 
     k_event_post(&app_events, APP_EVENT_ERROR);
@@ -628,6 +633,8 @@ static void post_error(struct app_object *s, uint32_t error_bit)
 
 static void clear_error(struct app_object *s)
 {
+    atomic_set(&atomic_error_flags, 0);
+
     if (s != NULL) {
         s->error_code = APP_ERROR_NONE;
     }
@@ -751,7 +758,14 @@ static enum smf_state_result init_run(void *o)
 
     k_event_clear(&app_events, APP_EVENT_MASK);
     clear_error(s);
-
+    k_work_init_delayable(&hr_led_work, hr_led_work_handler);
+    k_work_init_delayable(&button0_debounce_work, button0_debounce_handler);
+    k_work_init_delayable(&button1_debounce_work, button1_debounce_handler);
+    k_work_init_delayable(&button2_debounce_work, button2_debounce_handler);
+    k_work_init_delayable(&button3_debounce_work, button3_debounce_handler);
+    k_work_init(&ble_hr_notify_work, ble_hr_notify_handler);
+    k_work_init(&ble_temp_notify_work, ble_temp_notify_handler);
+    k_work_init(&ble_error_notify_work, ble_error_notify_handler);
     k_thread_name_set(heartbeat_thread_id, "heartbeat");
 
     err = setup_adc_single();
@@ -838,12 +852,9 @@ static enum smf_state_result idle_run(void *o)
     uint32_t events = k_event_wait(&app_events,
                                    APP_BUTTON_EVENT_MASK    |
                                    APP_SYSTEM_EVENT_MASK    |
-                                   APP_EVENT_BATTERY_SAMPLE |
-                                   APP_EVENT_HR_LED_TOGGLE,   /* consume if LED preserved from ECG */
+                                   APP_EVENT_BATTERY_SAMPLE,
                                    true,
                                    K_FOREVER);
-
-    LOG_INF("IDLE event mask: 0x%08x", events);
 
     LOG_INF("IDLE event mask: 0x%08x", events);
 
@@ -871,30 +882,6 @@ static enum smf_state_result idle_run(void *o)
     if (events & APP_EVENT_BUTTON0_IDLE) {
         LOG_INF("BUTTON0 in IDLE: already idle, no action");
         smf_set_state(SMF_CTX(s), &app_states[STATE_IDLE]);
-        return SMF_EVENT_HANDLED;
-    }
-
-    /*
-     * HR LED timer may still be running if BUTTON0 preserved ECG results.
-     * Service the toggle event here to keep LED2 blinking in IDLE.
-     */
-    if (events & APP_EVENT_HR_LED_TOGGLE) {
-        if (s->hr_led_active) {
-            if (s->hr_led_on) {
-                s->hr_led_on = false;
-                (void)set_led2_duty_cycle(0U);
-                k_timer_start(&hr_led_timer,
-                              K_MSEC(s->hr_led_off_ms),
-                              K_NO_WAIT);
-            } else {
-                s->hr_led_on = true;
-                (void)set_led2_duty_cycle(100U);
-                k_timer_start(&hr_led_timer,
-                              K_MSEC(s->hr_led_on_ms),
-                              K_NO_WAIT);
-            }
-        }
-        /* no smf_set_state — stay in IDLE and loop back to k_event_wait */
         return SMF_EVENT_HANDLED;
     }
 
@@ -986,7 +973,7 @@ static void temperature_entry(void *o)
             abs(s->temperature_centi_c % 100));
 
     ble_update_temperature(s->temperature_centi_c);
-    ble_notify_temperature();
+    k_work_submit(&ble_temp_notify_work);
 
     smf_set_state(SMF_CTX(s), &app_states[STATE_IDLE]);
 }
@@ -1023,12 +1010,11 @@ static enum smf_state_result ecg_run(void *o)
 
     uint32_t events = k_event_wait(&app_events,
                                    APP_EVENT_ECG_SAMPLE    |
-                                   APP_EVENT_BUTTON0_IDLE  | /* FIX 1 */
+                                   APP_EVENT_BUTTON0_IDLE  |
                                    APP_EVENT_BUTTON2_ECG   |
                                    APP_EVENT_BUTTON1_TEMP  |
                                    APP_EVENT_BUTTON3_RESET |
-                                   APP_EVENT_HR_LED_TOGGLE | /* FIX 3 */
-                                   APP_EVENT_BATTERY_SAMPLE| /* FIX 4 */
+                                   APP_EVENT_BATTERY_SAMPLE|
                                    APP_EVENT_ERROR,
                                    true,
                                    K_FOREVER);
@@ -1078,7 +1064,7 @@ static enum smf_state_result ecg_run(void *o)
                 abs(s->temperature_centi_c % 100));
 
         ble_update_temperature(s->temperature_centi_c);
-        ble_notify_temperature();
+        k_work_submit(&ble_temp_notify_work);
     }
 
     /*
@@ -1093,55 +1079,28 @@ static enum smf_state_result ecg_run(void *o)
                 s->battery_percent);
     }
 
-    /*
-     * FIX 3: HR LED PWM toggle is now deferred from the timer ISR via
-     * an event, so pwm_set_dt() is called here in thread context where
-     * it is safe.
-     */
-    if (events & APP_EVENT_HR_LED_TOGGLE) {
-        if (s->hr_led_active) {
-            if (s->hr_led_on) {
-                s->hr_led_on = false;
-                (void)set_led2_duty_cycle(0U);
-                k_timer_start(&hr_led_timer,
-                              K_MSEC(s->hr_led_off_ms),
-                              K_NO_WAIT);
-            } else {
-                s->hr_led_on = true;
-                (void)set_led2_duty_cycle(100U);
-                k_timer_start(&hr_led_timer,
-                              K_MSEC(s->hr_led_on_ms),
-                              K_NO_WAIT);
-            }
-        }
-    }
-
     if (events & APP_EVENT_ECG_SAMPLE) {
         int32_t sample_mv;
-        int ret = read_ecg_sample_mv(&sample_mv);
 
-        if (ret < 0) {
-            post_error(s, APP_ERROR_ADC_READ);
-            smf_set_state(SMF_CTX(s), &app_states[STATE_ERROR]);
-            return SMF_EVENT_HANDLED;
-        }
+        /* drain all queued samples in one pass */
+        while (k_msgq_get(&ecg_msgq, &sample_mv, K_NO_WAIT) == 0) {
+            s->ecg_mv = sample_mv;
 
-        s->ecg_mv = sample_mv;
-
-        if (s->ecg_buf_index < ECG_BUF_LEN) {
-            s->ecg_buf[s->ecg_buf_index] = (int16_t)sample_mv;
-            s->ecg_buf_index++;
-            s->ecg_sample_count++;
-        }
-
-        if (s->ecg_buf_index >= ECG_BUF_LEN) {
-            ret = process_ecg_window(s);
-            if (ret < 0) {
-                LOG_WRN("ECG: unable to calculate valid heart rate from current window");
+            if (s->ecg_buf_index < ECG_BUF_LEN) {
+                s->ecg_buf[s->ecg_buf_index] = (int16_t)sample_mv;
+                s->ecg_buf_index++;
+                s->ecg_sample_count++;
             }
 
-            s->ecg_buf_index = 0U;
-            memset(s->ecg_buf, 0, sizeof(s->ecg_buf));
+            if (s->ecg_buf_index >= ECG_BUF_LEN) {
+                int ret = process_ecg_window(s);
+                if (ret < 0) {
+                    LOG_WRN("ECG: unable to calculate valid heart rate from current window");
+                }
+
+                s->ecg_buf_index = 0U;
+                memset(s->ecg_buf, 0, sizeof(s->ecg_buf));
+            }
         }
     }
 
@@ -1154,6 +1113,7 @@ static void ecg_exit(void *o)
 
     k_timer_stop(&ecg_sample_timer);
     k_event_clear(&app_events, APP_EVENT_ECG_SAMPLE);
+    k_msgq_purge(&ecg_msgq);
 
     s->ecg_active = false;
 
@@ -1197,7 +1157,7 @@ static void error_entry(void *o)
     LOG_ERR("Entered ERROR state with error_code=0x%08x", s->error_code);
 
     ble_update_error(s->error_code);
-    ble_notify_error();
+    k_work_submit(&ble_error_notify_work);
 }
 
 static enum smf_state_result error_run(void *o)
@@ -1392,7 +1352,7 @@ void idle_button_callback(const struct device *dev, struct gpio_callback *cb, ui
     ARG_UNUSED(cb);
     ARG_UNUSED(pins);
 
-    k_event_post(&app_events, APP_EVENT_BUTTON0_IDLE);
+    k_work_reschedule(&button0_debounce_work, K_MSEC(BUTTON_DEBOUNCE_MS));
 }
 
 void sleep_button_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
@@ -1401,7 +1361,7 @@ void sleep_button_callback(const struct device *dev, struct gpio_callback *cb, u
     ARG_UNUSED(cb);
     ARG_UNUSED(pins);
 
-    k_event_post(&app_events, APP_EVENT_BUTTON1_TEMP);
+    k_work_reschedule(&button1_debounce_work, K_MSEC(BUTTON_DEBOUNCE_MS));
 }
 
 void reset_button_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
@@ -1410,7 +1370,7 @@ void reset_button_callback(const struct device *dev, struct gpio_callback *cb, u
     ARG_UNUSED(cb);
     ARG_UNUSED(pins);
 
-    k_event_post(&app_events, APP_EVENT_BUTTON3_RESET);
+    k_work_reschedule(&button3_debounce_work, K_MSEC(BUTTON_DEBOUNCE_MS));
 }
 
 void freq_up_button_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
@@ -1419,16 +1379,27 @@ void freq_up_button_callback(const struct device *dev, struct gpio_callback *cb,
     ARG_UNUSED(cb);
     ARG_UNUSED(pins);
 
-    k_event_post(&app_events, APP_EVENT_BUTTON2_ECG);
+    k_work_reschedule(&button2_debounce_work, K_MSEC(BUTTON_DEBOUNCE_MS));
 }
 
 void ecg_sample_timer_handler(struct k_timer *t)
 {
     ARG_UNUSED(t);
 
+    int32_t sample_mv;
+    int ret = do_diff_single_sample(&sample_mv);
+
+    if (ret < 0) {
+        k_event_post(&app_events, APP_EVENT_ERROR);
+        return;
+    }
+
+    if (k_msgq_put(&ecg_msgq, &sample_mv, K_NO_WAIT) != 0) {
+        LOG_WRN("ECG msgq full, sample dropped");
+    }
+
     k_event_post(&app_events, APP_EVENT_ECG_SAMPLE);
 }
-
 void ecg_sample_timer_stop_fn(struct k_timer *t)
 {
     ARG_UNUSED(t);
@@ -1494,21 +1465,82 @@ void battery_timer_handler(struct k_timer *t)
     k_event_post(&app_events, APP_EVENT_BATTERY_SAMPLE);
 }
 /*
- * FIX 3: hr_led_timer_handler no longer calls pwm_set_dt() directly.
- * pwm_set_dt() must not be called from ISR/timer context on nRF52.
- * Instead, post APP_EVENT_HR_LED_TOGGLE so ecg_run() handles the PWM
- * call in thread context. The actual on/off state and next timer
- * restart happen in ecg_run() under APP_EVENT_HR_LED_TOGGLE.
+ * HR LED delayable work handler — runs in system work queue thread context,
+ * safe to call pwm_set_dt() here. Reschedules itself to produce the
+ * correct on/off timing for the current heart rate.
  */
-void hr_led_timer_handler(struct k_timer *t)
+static void hr_led_work_handler(struct k_work *work)
 {
-    ARG_UNUSED(t);
+    ARG_UNUSED(work);
 
     if (!s_obj.hr_led_active) {
         return;
     }
 
-    k_event_set(&app_events, APP_EVENT_HR_LED_TOGGLE);
+    if (s_obj.hr_led_on) {
+        s_obj.hr_led_on = false;
+        (void)set_led2_duty_cycle(0U);
+        k_work_reschedule(&hr_led_work, K_MSEC(s_obj.hr_led_off_ms));
+    } else {
+        s_obj.hr_led_on = true;
+        (void)set_led2_duty_cycle(100U);
+        k_work_reschedule(&hr_led_work, K_MSEC(s_obj.hr_led_on_ms));
+    }
+}
+
+static void ble_hr_notify_handler(struct k_work *work)
+{
+    ARG_UNUSED(work);
+    int ret = bt_hrs_notify(s_obj.heart_rate_avg_bpm);
+    if (ret < 0) {
+        LOG_WRN("HRS notify failed (%d)", ret);
+    } else {
+        LOG_INF("HRS notify: %u BPM", s_obj.heart_rate_avg_bpm);
+    }
+}
+
+static void ble_temp_notify_handler(struct k_work *work)
+{
+    ARG_UNUSED(work);
+    ble_notify_temperature();
+}
+
+static void ble_error_notify_handler(struct k_work *work)
+{
+    ARG_UNUSED(work);
+    ble_notify_error();
+}
+
+static void button0_debounce_handler(struct k_work *work)
+{
+    ARG_UNUSED(work);
+    if (gpio_pin_get_dt(&idle_button) > 0) {
+        k_event_post(&app_events, APP_EVENT_BUTTON0_IDLE);
+    }
+}
+
+static void button1_debounce_handler(struct k_work *work)
+{
+    ARG_UNUSED(work);
+    if (gpio_pin_get_dt(&sleep_button) > 0) {
+        k_event_post(&app_events, APP_EVENT_BUTTON1_TEMP);
+    }
+}
+
+static void button2_debounce_handler(struct k_work *work)
+{
+    ARG_UNUSED(work);
+    if (gpio_pin_get_dt(&freq_up_button) > 0) {
+        k_event_post(&app_events, APP_EVENT_BUTTON2_ECG);
+    }
+}
+
+static void button3_debounce_handler(struct k_work *work)
+{
+    ARG_UNUSED(work);
+    if (gpio_pin_get_dt(&reset_button) > 0) {
+        k_event_post(&app_events, APP_EVENT_BUTTON3_RESET);
+    }
 }
 
 /* threads */
