@@ -37,6 +37,7 @@ static struct k_work_delayable button3_debounce_work;
 static struct k_work ble_hr_notify_work;
 static struct k_work ble_temp_notify_work;
 static struct k_work ble_error_notify_work;
+static struct k_work ecg_sample_work;
 /* macros */
 #define HEARTBEAT_HALF_PERIOD_MS 500
 #define ERROR_BLINK_HALF_PERIOD_MS 500
@@ -62,7 +63,7 @@ static struct k_work ble_error_notify_work;
 #define ECG_THRESHOLD_MV        200     // tune 150–300 based on signal
 #define ECG_REFRACTORY_SAMPLES  (uint32_t)(ECG_SAMPLE_RATE_HZ * 0.3) // 300 ms
 #define ECG_MAX_PEAKS           16
-#define ECG_AVG_WINDOW          4
+#define ECG_AVG_WINDOW          2
 
 #define HR_LED_MIN_BPM 40U
 #define HR_LED_MAX_BPM 200U
@@ -269,6 +270,7 @@ static int mcp9808_read_temp(int32_t *temp_centi_c);
 void ecg_sample_timer_handler(struct k_timer *t);
 void ecg_sample_timer_stop_fn(struct k_timer *t);
 static int process_ecg_window(struct app_object *s);
+static void ecg_sample_work_handler(struct k_work *work);
 
 static int update_hr_led_timing(struct app_object *s, uint16_t bpm);
 static void stop_hr_led(struct app_object *s);
@@ -481,6 +483,17 @@ static int process_ecg_window(struct app_object *s)
     }
 
     uint16_t bpm = (uint16_t)(bpm_d + 0.5);
+
+    if (s->hr_hist_count > 0) {
+        uint16_t prev = s->heart_rate_avg_bpm;
+
+        if (prev > 0 && abs((int)bpm - (int)prev) > 30) {
+            s->hr_hist_idx = 0;
+            s->hr_hist_count = 0;
+            memset(s->hr_history, 0, sizeof(s->hr_history));
+            LOG_INF("ECG: HR jump detected, moving average reset");
+        }
+    }
 
     // --- Moving average ---
     s->hr_history[s->hr_hist_idx] = bpm;
@@ -764,6 +777,7 @@ static enum smf_state_result init_run(void *o)
     k_work_init_delayable(&button2_debounce_work, button2_debounce_handler);
     k_work_init_delayable(&button3_debounce_work, button3_debounce_handler);
     k_work_init(&ble_hr_notify_work, ble_hr_notify_handler);
+    k_work_init(&ecg_sample_work, ecg_sample_work_handler);
     k_work_init(&ble_temp_notify_work, ble_temp_notify_handler);
     k_work_init(&ble_error_notify_work, ble_error_notify_handler);
     k_thread_name_set(heartbeat_thread_id, "heartbeat");
@@ -1386,20 +1400,29 @@ void ecg_sample_timer_handler(struct k_timer *t)
 {
     ARG_UNUSED(t);
 
+    k_work_submit(&ecg_sample_work);
+}
+
+static void ecg_sample_work_handler(struct k_work *work)
+{
+    ARG_UNUSED(work);
+
     int32_t sample_mv;
     int ret = do_diff_single_sample(&sample_mv);
 
     if (ret < 0) {
-        k_event_post(&app_events, APP_EVENT_ERROR);
+        post_error(&s_obj, APP_ERROR_ADC_READ);
         return;
     }
 
     if (k_msgq_put(&ecg_msgq, &sample_mv, K_NO_WAIT) != 0) {
         LOG_WRN("ECG msgq full, sample dropped");
+        return;
     }
 
     k_event_post(&app_events, APP_EVENT_ECG_SAMPLE);
 }
+
 void ecg_sample_timer_stop_fn(struct k_timer *t)
 {
     ARG_UNUSED(t);
@@ -1470,7 +1493,7 @@ void battery_timer_handler(struct k_timer *t)
  * correct on/off timing for the current heart rate.
  */
 static void hr_led_work_handler(struct k_work *work)
-{
+{   
     ARG_UNUSED(work);
 
     if (!s_obj.hr_led_active) {
