@@ -46,7 +46,7 @@ static struct k_work ecg_sample_work;
 #define HEARTBEAT_STACK_SIZE 1024
 #define HEARTBEAT_THREAD_PRIO 5
 
-#define BATTERY_SAMPLE_INTERVAL_MS (60U * 1000U)
+#define BATTERY_SAMPLE_INTERVAL_MS (5U * 1000U)
 #define BATTERY_MAX_MV            3000
 #define BATTERY_LOW_THRESHOLD_PCT 75U
 
@@ -146,18 +146,17 @@ static const struct gpio_dt_spec iv_pump_led =
 static const struct gpio_dt_spec error_led =
     GPIO_DT_SPEC_GET(DT_ALIAS(error), gpios);
 
-/* FIX 1: BUTTON0 — returns to IDLE, preserves all measurements */
-static const struct gpio_dt_spec sleep_button =
-    GPIO_DT_SPEC_GET(DT_ALIAS(sleepbutton), gpios);
+static const struct gpio_dt_spec button0_idle =
+    GPIO_DT_SPEC_GET(DT_ALIAS(button0_idle), gpios);
 
-static const struct gpio_dt_spec freq_up_button =
-    GPIO_DT_SPEC_GET(DT_ALIAS(frequpbutton), gpios);
+static const struct gpio_dt_spec button1_temp =
+    GPIO_DT_SPEC_GET(DT_ALIAS(button1_temp), gpios);
 
-static const struct gpio_dt_spec idle_button =
-    GPIO_DT_SPEC_GET(DT_ALIAS(idlebutton), gpios);
+static const struct gpio_dt_spec button2_ecg =
+    GPIO_DT_SPEC_GET(DT_ALIAS(button2_ecg), gpios);
 
-static const struct gpio_dt_spec reset_button =
-    GPIO_DT_SPEC_GET(DT_ALIAS(resetbutton), gpios);
+static const struct gpio_dt_spec button3_reset =
+    GPIO_DT_SPEC_GET(DT_ALIAS(button3_reset), gpios);
 
 static const struct adc_dt_spec adc_single = 
     ADC_DT_SPEC_GET_BY_ALIAS(vadc_single);
@@ -174,16 +173,16 @@ static const struct pwm_dt_spec led3_pwm =
     PWM_DT_SPEC_GET(DT_ALIAS(pwm_led3));
 
 /* callback prototypes */
-void idle_button_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins);   /* FIX 1 */
-void sleep_button_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins);
-void reset_button_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins);
-void freq_up_button_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins);
+void button0_idle_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins);
+void button1_temp_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins);
+void button2_ecg_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins);
+void button3_reset_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins);
 
 /* callback structs */
-static struct gpio_callback idle_button_cb;     /* FIX 1 */
-static struct gpio_callback sleep_button_cb;
-static struct gpio_callback reset_button_cb;
-static struct gpio_callback freq_up_button_cb;
+static struct gpio_callback button0_idle_cb;
+static struct gpio_callback button1_temp_cb;
+static struct gpio_callback button2_ecg_cb;
+static struct gpio_callback button3_reset_cb;
 
 /* SMF state machine */
 enum app_state {
@@ -612,10 +611,11 @@ static int setup_adc_diff(void)
 
 static void enable_button_interrupts(void)
 {
-    (void)gpio_pin_interrupt_configure_dt(&idle_button,    GPIO_INT_EDGE_TO_ACTIVE); /* FIX 1 */
-    (void)gpio_pin_interrupt_configure_dt(&sleep_button,   GPIO_INT_EDGE_TO_ACTIVE);
-    (void)gpio_pin_interrupt_configure_dt(&freq_up_button, GPIO_INT_EDGE_TO_ACTIVE);
-    (void)gpio_pin_interrupt_configure_dt(&reset_button,   GPIO_INT_EDGE_TO_ACTIVE);
+    (void) gpio_pin_interrupt_configure_dt(&button0_idle, GPIO_INT_EDGE_TO_ACTIVE);
+    (void) gpio_pin_interrupt_configure_dt(&button1_temp, GPIO_INT_EDGE_TO_ACTIVE);
+    (void) gpio_pin_interrupt_configure_dt(&button2_ecg,  GPIO_INT_EDGE_TO_ACTIVE);
+    (void) gpio_pin_interrupt_configure_dt(&button3_reset, GPIO_INT_EDGE_TO_ACTIVE);
+
 }
 
 static void disable_measurement_button_interrupts(void)
@@ -627,10 +627,11 @@ static void disable_measurement_button_interrupts(void)
      *   BUTTON2 → stop ECG
      *   BUTTON3 → reset
      */
-    (void)gpio_pin_interrupt_configure_dt(&idle_button,    GPIO_INT_EDGE_TO_ACTIVE); /* FIX 1 */
-    (void)gpio_pin_interrupt_configure_dt(&sleep_button,   GPIO_INT_EDGE_TO_ACTIVE);
-    (void)gpio_pin_interrupt_configure_dt(&freq_up_button, GPIO_INT_EDGE_TO_ACTIVE);
-    (void)gpio_pin_interrupt_configure_dt(&reset_button,   GPIO_INT_EDGE_TO_ACTIVE);
+
+    (void) gpio_pin_interrupt_configure_dt(&button0_idle, GPIO_INT_EDGE_TO_ACTIVE);
+    (void) gpio_pin_interrupt_configure_dt(&button1_temp, GPIO_INT_EDGE_TO_ACTIVE);
+    (void) gpio_pin_interrupt_configure_dt(&button2_ecg,  GPIO_INT_EDGE_TO_ACTIVE);
+    (void) gpio_pin_interrupt_configure_dt(&button3_reset, GPIO_INT_EDGE_TO_ACTIVE);
 }
 
 static void post_error(struct app_object *s, uint32_t error_bit)
@@ -712,24 +713,24 @@ static enum smf_state_result init_run(void *o)
     struct app_object *s = (struct app_object *)o;
     int err, ret;
 
-    if (!device_is_ready(sleep_button.port)) {
+    if (!device_is_ready(button0_idle.port)) {
         LOG_ERR("gpio0 interface not ready.");
         smf_set_terminate(SMF_CTX(s), -1);
         return SMF_EVENT_HANDLED;
     }
 
     /* FIX 1: configure BUTTON0 */
-    err = gpio_pin_configure_dt(&idle_button, GPIO_INPUT);
-    if (err < 0) { LOG_ERR("Cannot configure idle button."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
+    err = gpio_pin_configure_dt(&button0_idle, GPIO_INPUT);
+    if (err < 0) { LOG_ERR("Cannot configure BUTTON0 idle button."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
 
-    err = gpio_pin_configure_dt(&sleep_button, GPIO_INPUT);
-    if (err < 0) { LOG_ERR("Cannot configure sleep button."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
+    err = gpio_pin_configure_dt(&button1_temp, GPIO_INPUT);
+    if (err < 0) { LOG_ERR("Cannot configure BUTTON1 temperature button."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
 
-    err = gpio_pin_configure_dt(&reset_button, GPIO_INPUT);
-    if (err < 0) { LOG_ERR("Cannot configure reset button."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
+    err = gpio_pin_configure_dt(&button2_ecg, GPIO_INPUT);
+    if (err < 0) { LOG_ERR("Cannot configure BUTTON2 ECG button."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
 
-    err = gpio_pin_configure_dt(&freq_up_button, GPIO_INPUT);
-    if (err < 0) { LOG_ERR("Cannot configure freq_up button."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
+    err = gpio_pin_configure_dt(&button3_reset, GPIO_INPUT);
+    if (err < 0) { LOG_ERR("Cannot configure BUTTON3 reset button."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
 
     err = gpio_pin_configure_dt(&heartbeat_led, GPIO_OUTPUT_INACTIVE);
     if (err < 0) { LOG_ERR("Cannot configure heartbeat LED."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
@@ -741,33 +742,33 @@ static enum smf_state_result init_run(void *o)
     if (err < 0) { LOG_ERR("Cannot configure error LED."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
 
     /* FIX 1: attach interrupt and callback for BUTTON0 */
-    err = gpio_pin_interrupt_configure_dt(&idle_button, GPIO_INT_EDGE_TO_ACTIVE);
-    if (err < 0) { LOG_ERR("Cannot attach interrupt to idle button."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
+    err = gpio_pin_interrupt_configure_dt(&button0_idle, GPIO_INT_EDGE_TO_ACTIVE);
+    if (err < 0) { LOG_ERR("Cannot attach interrupt to BUTTON0 idle button."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
 
-    err = gpio_pin_interrupt_configure_dt(&sleep_button, GPIO_INT_EDGE_TO_ACTIVE);
-    if (err < 0) { LOG_ERR("Cannot attach callback to sw0."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
+    err = gpio_pin_interrupt_configure_dt(&button1_temp, GPIO_INT_EDGE_TO_ACTIVE);
+    if (err < 0) { LOG_ERR("Cannot attach interrupt to BUTTON1 temperature button."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
 
-    err = gpio_pin_interrupt_configure_dt(&reset_button, GPIO_INT_EDGE_TO_ACTIVE);
-    if (err < 0) { LOG_ERR("Cannot attach callback to sw3."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
+    err = gpio_pin_interrupt_configure_dt(&button2_ecg, GPIO_INT_EDGE_TO_ACTIVE);
+    if (err < 0) { LOG_ERR("Cannot attach interrupt to BUTTON2 ECG button."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
 
-    err = gpio_pin_interrupt_configure_dt(&freq_up_button, GPIO_INT_EDGE_TO_ACTIVE);
-    if (err < 0) { LOG_ERR("Cannot attach callback to sw1."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
+    err = gpio_pin_interrupt_configure_dt(&button3_reset, GPIO_INT_EDGE_TO_ACTIVE);
+    if (err < 0) { LOG_ERR("Cannot attach interrupt to BUTTON3 reset button."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
 
-    gpio_init_callback(&idle_button_cb, idle_button_callback, BIT(idle_button.pin)); /* FIX 1 */
-    err = gpio_add_callback_dt(&idle_button, &idle_button_cb);
+    gpio_init_callback(&button0_idle_cb, button0_idle_callback, BIT(button0_idle.pin));
+    err = gpio_add_callback_dt(&button0_idle, &button0_idle_cb);
     if (err < 0) { LOG_ERR("Cannot add idle button callback."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
 
-    gpio_init_callback(&sleep_button_cb, sleep_button_callback, BIT(sleep_button.pin));
-    err = gpio_add_callback_dt(&sleep_button, &sleep_button_cb);
-    if (err < 0) { LOG_ERR("Cannot add sleep button callback."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
+    gpio_init_callback(&button1_temp_cb, button1_temp_callback, BIT(button1_temp.pin));
+    err= gpio_add_callback_dt(&button1_temp, &button1_temp_cb);
+    if (err < 0) { LOG_ERR("Cannot add temp button callback."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
 
-    gpio_init_callback(&reset_button_cb, reset_button_callback, BIT(reset_button.pin));
-    err = gpio_add_callback_dt(&reset_button, &reset_button_cb);
+    gpio_init_callback(&button2_ecg_cb, button2_ecg_callback, BIT(button2_ecg.pin));
+    err = gpio_add_callback_dt(&button2_ecg, &button2_ecg_cb);
+    if (err < 0) { LOG_ERR("Cannot add ecg button callback."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
+
+    gpio_init_callback(&button3_reset_cb, button3_reset_callback, BIT(button3_reset.pin));
+    err = gpio_add_callback_dt(&button3_reset, &button3_reset_cb);
     if (err < 0) { LOG_ERR("Cannot add reset button callback."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
-
-    gpio_init_callback(&freq_up_button_cb, freq_up_button_callback, BIT(freq_up_button.pin));
-    err = gpio_add_callback_dt(&freq_up_button, &freq_up_button_cb);
-    if (err < 0) { LOG_ERR("Cannot add freq_up button callback."); smf_set_terminate(SMF_CTX(s), err); return SMF_EVENT_HANDLED; }
 
     k_event_clear(&app_events, APP_EVENT_MASK);
     clear_error(s);
@@ -934,10 +935,11 @@ static void battery_entry(void *o)
     s->battery_mv = s->adc_mv;
     s->battery_percent = map_mv_to_percent(s->battery_mv);
 
-    LOG_INF("Battery: %d mV (%u%%)",
-            s->battery_mv,
-            s->battery_percent);
-    
+    LOG_INF("Battery ADC: raw=%d mv=%d percent=%u%%",
+        s->adc_raw,
+        s->adc_mv,
+        map_mv_to_percent(s->adc_mv));
+
     ble_update_battery_mv(s->battery_mv);
 
     ret = set_led1_pwm(s->battery_percent);
@@ -1294,8 +1296,10 @@ static int do_single_sample(struct app_object *s)
     int32_t val_mv = 0;
 
     struct adc_sequence sequence = {
+        .channels = BIT(adc_single.channel_id),
         .buffer = &buf,
         .buffer_size = sizeof(buf),
+        .resolution = adc_single.resolution,
     };
 
     (void)adc_sequence_init_dt(&adc_single, &sequence);
@@ -1355,45 +1359,52 @@ static int do_diff_single_sample(int32_t *mv_out)
 }
 
 /* GPIO callbacks */
-
-/*
- * FIX 1: BUTTON0 callback — posts IDLE event (preserves measurements).
- * The state handlers distinguish this from BUTTON3 by NOT calling clear_error().
- */
-void idle_button_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
+void button0_idle_callback(const struct device *dev,
+                           struct gpio_callback *cb,
+                           uint32_t pins)
 {
     ARG_UNUSED(dev);
     ARG_UNUSED(cb);
     ARG_UNUSED(pins);
 
-    k_work_reschedule(&button0_debounce_work, K_MSEC(BUTTON_DEBOUNCE_MS));
+    k_work_reschedule(&button0_debounce_work,
+                      K_MSEC(BUTTON_DEBOUNCE_MS));
 }
 
-void sleep_button_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
+void button1_temp_callback(const struct device *dev,
+                           struct gpio_callback *cb,
+                           uint32_t pins)
 {
     ARG_UNUSED(dev);
     ARG_UNUSED(cb);
     ARG_UNUSED(pins);
 
-    k_work_reschedule(&button1_debounce_work, K_MSEC(BUTTON_DEBOUNCE_MS));
+    k_work_reschedule(&button1_debounce_work,
+                      K_MSEC(BUTTON_DEBOUNCE_MS));
 }
 
-void reset_button_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
+void button2_ecg_callback(const struct device *dev,
+                          struct gpio_callback *cb,
+                          uint32_t pins)
 {
     ARG_UNUSED(dev);
     ARG_UNUSED(cb);
     ARG_UNUSED(pins);
 
-    k_work_reschedule(&button3_debounce_work, K_MSEC(BUTTON_DEBOUNCE_MS));
+    k_work_reschedule(&button2_debounce_work,
+                      K_MSEC(BUTTON_DEBOUNCE_MS));
 }
 
-void freq_up_button_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
+void button3_reset_callback(const struct device *dev,
+                            struct gpio_callback *cb,
+                            uint32_t pins)
 {
     ARG_UNUSED(dev);
     ARG_UNUSED(cb);
     ARG_UNUSED(pins);
 
-    k_work_reschedule(&button2_debounce_work, K_MSEC(BUTTON_DEBOUNCE_MS));
+    k_work_reschedule(&button3_debounce_work,
+                      K_MSEC(BUTTON_DEBOUNCE_MS));
 }
 
 void ecg_sample_timer_handler(struct k_timer *t)
@@ -1537,7 +1548,7 @@ static void ble_error_notify_handler(struct k_work *work)
 static void button0_debounce_handler(struct k_work *work)
 {
     ARG_UNUSED(work);
-    if (gpio_pin_get_dt(&idle_button) > 0) {
+    if (gpio_pin_get_dt(&button0_idle) > 0) {
         k_event_post(&app_events, APP_EVENT_BUTTON0_IDLE);
     }
 }
@@ -1545,7 +1556,7 @@ static void button0_debounce_handler(struct k_work *work)
 static void button1_debounce_handler(struct k_work *work)
 {
     ARG_UNUSED(work);
-    if (gpio_pin_get_dt(&sleep_button) > 0) {
+    if (gpio_pin_get_dt(&button1_temp) > 0) {
         k_event_post(&app_events, APP_EVENT_BUTTON1_TEMP);
     }
 }
@@ -1553,7 +1564,7 @@ static void button1_debounce_handler(struct k_work *work)
 static void button2_debounce_handler(struct k_work *work)
 {
     ARG_UNUSED(work);
-    if (gpio_pin_get_dt(&freq_up_button) > 0) {
+    if (gpio_pin_get_dt(&button2_ecg) > 0) {
         k_event_post(&app_events, APP_EVENT_BUTTON2_ECG);
     }
 }
@@ -1561,7 +1572,7 @@ static void button2_debounce_handler(struct k_work *work)
 static void button3_debounce_handler(struct k_work *work)
 {
     ARG_UNUSED(work);
-    if (gpio_pin_get_dt(&reset_button) > 0) {
+    if (gpio_pin_get_dt(&button3_reset) > 0) {
         k_event_post(&app_events, APP_EVENT_BUTTON3_RESET);
     }
 }
