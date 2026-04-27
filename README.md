@@ -1,65 +1,33 @@
-[![pipeline status](https://gitlab.oit.duke.edu/nm329/duke-bme554-ecg-temp-ble-lab/badges/main/pipeline.svg)](https://gitlab.oit.duke.edu/nm329/duke-bme554-ecg-temp-ble-lab/-/commits/main) 
+# Zephyr RTOS Real-Time Health Monitoring System
 
-# Duke BME 554: ECG, Temperature, and BLE Device Labs
+Embedded system built on the nRF52833 using Zephyr RTOS to simulate a real-time physiological monitoring device.
 
-The CI build badge above indicates the status of the main branch of the repository. A green badge means that the latest commit has passed all tests, while a red badge indicates that there are failing tests.
+## Overview
+This project implements a full embedded pipeline including:
+- State machine–based system control (sleep, awake, error states)
+- Multi-threaded scheduling (heartbeat, action signals)
+- Timer-driven LED signaling (1–5 Hz physiological range)
+- ADC pipelines (single-sample + differential)
+- Real-time signal processing (frequency extraction)
+- Hardware integration (GPIO, PWM, ADC)
 
-## Project Repository Overview
+## Architecture
+- Zephyr RTOS (threads, timers, interrupts)
+- Event-driven design using atomic flags
+- Modular drivers for ADC, LED control, and input handling
 
-* `application/src/main.c` - main application code
-* `application/CMakePresets.json` - CMake presets file (build configuration)
-* `application/CMakeLists.txt` - build system configuration file
-* `application/prj.conf` - Zephyr configuration file
-* `.gitlab-ci.yml` - GitLab CI configuration file
-* `.gitignore` - ignore files that are not needed in the git repository
-* `.west.yml` - Zephyr west configuration file
-* `testing/technical_report.ipynb` - Jupyter notebook for the technical report
+## Key Features
+- Real-time frequency control via user input
+- Out-of-phase LED signaling for simulated actuation
+- ADC-based input processing and validation
+- Oscilloscope-based validation of timing + signals
 
-## Getting Started
+## My Contribution
+Designed and implemented the full embedded firmware, including:
+- State machine architecture
+- Threading model and timing logic
+- ADC data acquisition and analysis pipeline
+- Hardware-software integration and debugging
 
-
-## Zephyr Devicetree, GPIO & Callbacks
-
-First Lab to explore Zephyr's Devicetree, GPIO, and Interrupt Service Routines (ISRs).
-
-[https://mlp6.github.io/Embedded-Medical-Devices/labs/zephyr-gpio-isr-callbacks-lab.html](https://mlp6.github.io/Embedded-Medical-Devices/labs/zephyr-gpio-isr-callbacks-lab.html)
-
-## Timers
-
-This lab introduces Zephyr's timer APIs, which are essential for implementing time-based functionality in embedded applications.
-
-[https://mlp6.github.io/Embedded-Medical-Devices/labs/zephyr-timers-lab.html](https://mlp6.github.io/Embedded-Medical-Devices/labs/zephyr-timers-lab.html)
-
-## Kernel Events & Threads
-
-This lab explores Zephyr's threading model and event handling, which are crucial for managing concurrent tasks in embedded systems.
-
-[https://mlp6.github.io/Embedded-Medical-Devices/labs/zephyr-threads-events-lab.html](https://mlp6.github.io/Embedded-Medical-Devices/labs/zephyr-threads-events-lab.html)
-
-## State Machine Framework
-
-This lab introduces the State Machine Framework (SMF) in Zephyr, which is used to manage complex state transitions in embedded applications.
-
-[https://mlp6.github.io/Embedded-Medical-Devices/labs/zephyr-smf-lab.html](https://mlp6.github.io/Embedded-Medical-Devices/labs/zephyr-smf-lab.html)
-
-## Analog to Digital Conversion (ADC)
-
-This lab covers the use of ADC in Zephyr, which is essential for reading analog signals from sensors, including ECG electrodes.
-
-[https://mlp6.github.io/Embedded-Medical-Devices/labs/zephyr-adc-lab.html](https://mlp6.github.io/Embedded-Medical-Devices/labs/zephyr-adc-lab.html)
-
-## Pulse Width Modulation (PWM)
-
-This lab covers the use of PWM in Zephyr, which is essential for controlling the brightness of LEDs and the speed of motors.
-
-[https://mlp6.github.io/Embedded-Medical-Devices/labs/zephyr-pwm-lab.html](https://mlp6.github.io/Embedded-Medical-Devices/labs/zephyr-pwm-lab.html)
-
-## Serial Communication (I2C/Sensors)
-
-This lab introduces the use of I2C for communication with sensors, which is a common protocol in embedded systems.  We will use this to read temperature data from a sensor.
-
-## Bluetooth Low Energy (BLE)
-
-This lab covers the basics of Bluetooth Low Energy (BLE) communication, which is essential for wireless data transfer in embedded medical devices.
-
-[https://mlp6.github.io/Embedded-Medical-Devices/labs/ecg-temp-ble-lab.html](https://mlp6.github.io/Embedded-Medical-Devices/labs/ecg-temp-ble-lab.html)
+## Notes
+Development was done iteratively across multiple branches (ADC, PWM testing, ECG signal processing), then consolidated into this final implementation.
